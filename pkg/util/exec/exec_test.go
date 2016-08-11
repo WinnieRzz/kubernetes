@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func TestExecutorNoArgs(t *testing.T) {
 func TestExecutorWithArgs(t *testing.T) {
 	ex := New()
 
-	cmd := ex.Command("/bin/echo", "stdout")
+	cmd := ex.Command("echo", "stdout")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("expected success, got %+v", err)
@@ -90,5 +90,14 @@ func TestLookPath(t *testing.T) {
 	sh, _ := ex.LookPath("sh")
 	if sh != shExpected {
 		t.Errorf("unexpected result for LookPath: got %s, expected %s", sh, shExpected)
+	}
+}
+
+func TestExecutableNotFound(t *testing.T) {
+	exec := New()
+	cmd := exec.Command("fake_executable_name")
+	_, err := cmd.CombinedOutput()
+	if err != ErrExecutableNotFound {
+		t.Errorf("Expected error ErrExecutableNotFound but got %v", err)
 	}
 }

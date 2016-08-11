@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 type eventStrategy struct {
@@ -48,16 +48,20 @@ func (eventStrategy) PrepareForCreate(obj runtime.Object) {
 func (eventStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
-func (eventStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (eventStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	event := obj.(*api.Event)
 	return validation.ValidateEvent(event)
+}
+
+// Canonicalize normalizes the object after validation.
+func (eventStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (eventStrategy) AllowCreateOnUpdate() bool {
 	return true
 }
 
-func (eventStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (eventStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	event := obj.(*api.Event)
 	return validation.ValidateEvent(event)
 }
@@ -80,17 +84,18 @@ func getAttrs(obj runtime.Object) (objLabels labels.Set, objFields fields.Set, e
 		l = labels.Set{}
 	}
 
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(event.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(event.ObjectMeta, true)
 	specificFieldsSet := fields.Set{
 		"involvedObject.kind":            event.InvolvedObject.Kind,
 		"involvedObject.namespace":       event.InvolvedObject.Namespace,
 		"involvedObject.name":            event.InvolvedObject.Name,
 		"involvedObject.uid":             string(event.InvolvedObject.UID),
 		"involvedObject.apiVersion":      event.InvolvedObject.APIVersion,
-		"involvedObject.resourceVersion": fmt.Sprintf("%s", event.InvolvedObject.ResourceVersion),
+		"involvedObject.resourceVersion": event.InvolvedObject.ResourceVersion,
 		"involvedObject.fieldPath":       event.InvolvedObject.FieldPath,
 		"reason":                         event.Reason,
 		"source":                         event.Source.Component,
+		"type":                           event.Type,
 	}
 	return l, generic.MergeFieldsSets(objectMetaFieldsSet, specificFieldsSet), nil
 }

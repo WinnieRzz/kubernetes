@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package prober
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"reflect"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -26,8 +28,7 @@ import (
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/probe"
-	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/exec"
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 func TestFormatURL(t *testing.T) {
@@ -40,6 +41,8 @@ func TestFormatURL(t *testing.T) {
 	}{
 		{"http", "localhost", 93, "", "http://localhost:93"},
 		{"https", "localhost", 93, "/path", "https://localhost:93/path"},
+		{"http", "localhost", 93, "?foo", "http://localhost:93?foo"},
+		{"https", "localhost", 93, "/path?bar", "https://localhost:93/path?bar"},
 	}
 	for _, test := range testCases {
 		url := formatURL(test.scheme, test.host, test.port, test.path)
@@ -77,14 +80,14 @@ func TestGetURLParts(t *testing.T) {
 		port  int
 		path  string
 	}{
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromInt(-1), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString(""), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("-1"), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("not-found"), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("found"), Path: ""}, true, "127.0.0.1", 93, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromInt(76), Path: ""}, true, "127.0.0.1", 76, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("118"), Path: ""}, true, "127.0.0.1", 118, ""},
-		{&api.HTTPGetAction{Host: "hostname", Port: util.NewIntOrStringFromInt(76), Path: "path"}, true, "hostname", 76, "path"},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromInt(-1), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString(""), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("-1"), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("not-found"), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("found"), Path: ""}, true, "127.0.0.1", 93, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromInt(76), Path: ""}, true, "127.0.0.1", 76, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("118"), Path: ""}, true, "127.0.0.1", 118, ""},
+		{&api.HTTPGetAction{Host: "hostname", Port: intstr.FromInt(76), Path: "path"}, true, "hostname", 76, "path"},
 	}
 
 	for _, test := range testCases {
@@ -131,13 +134,13 @@ func TestGetTCPAddrParts(t *testing.T) {
 		host  string
 		port  int
 	}{
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromInt(-1)}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("")}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("-1")}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("not-found")}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("found")}, true, "1.2.3.4", 93},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromInt(76)}, true, "1.2.3.4", 76},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("118")}, true, "1.2.3.4", 118},
+		{&api.TCPSocketAction{Port: intstr.FromInt(-1)}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("")}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("-1")}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("not-found")}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("found")}, true, "1.2.3.4", 93},
+		{&api.TCPSocketAction{Port: intstr.FromInt(76)}, true, "1.2.3.4", 76},
+		{&api.TCPSocketAction{Port: intstr.FromString("118")}, true, "1.2.3.4", 118},
 	}
 
 	for _, test := range testCases {
@@ -165,12 +168,39 @@ func TestGetTCPAddrParts(t *testing.T) {
 	}
 }
 
+func TestHTTPHeaders(t *testing.T) {
+	testCases := []struct {
+		input  []api.HTTPHeader
+		output http.Header
+	}{
+		{[]api.HTTPHeader{}, http.Header{}},
+		{[]api.HTTPHeader{
+			{"X-Muffins-Or-Cupcakes", "Muffins"},
+		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins"}}},
+		{[]api.HTTPHeader{
+			{"X-Muffins-Or-Cupcakes", "Muffins"},
+			{"X-Muffins-Or-Plumcakes", "Muffins!"},
+		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins"},
+			"X-Muffins-Or-Plumcakes": {"Muffins!"}}},
+		{[]api.HTTPHeader{
+			{"X-Muffins-Or-Cupcakes", "Muffins"},
+			{"X-Muffins-Or-Cupcakes", "Cupcakes, too"},
+		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins", "Cupcakes, too"}}},
+	}
+	for _, test := range testCases {
+		headers := buildHeader(test.input)
+		if !reflect.DeepEqual(test.output, headers) {
+			t.Errorf("Expected %#v, got %#v", test.output, headers)
+		}
+	}
+}
+
 func TestProbe(t *testing.T) {
 	prober := &prober{
 		refManager: kubecontainer.NewRefManager(),
 		recorder:   &record.FakeRecorder{},
 	}
-	containerID := kubecontainer.ContainerID{"test", "foobar"}
+	containerID := kubecontainer.ContainerID{Type: "test", ID: "foobar"}
 
 	execProbe := &api.Probe{
 		Handler: api.Handler{
@@ -245,13 +275,4 @@ func TestProbe(t *testing.T) {
 			}
 		}
 	}
-}
-
-type fakeExecProber struct {
-	result probe.Result
-	err    error
-}
-
-func (p fakeExecProber) Probe(_ exec.Cmd) (probe.Result, string, error) {
-	return p.result, "", p.err
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,10 +24,25 @@ import (
 
 	"github.com/golang/glog"
 
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
+	"k8s.io/kubernetes/pkg/client/transport"
+	"k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
 	"k8s.io/kubernetes/pkg/util/httpstream"
 	"k8s.io/kubernetes/pkg/util/httpstream/spdy"
+	"k8s.io/kubernetes/pkg/util/term"
 )
+
+// StreamOptions holds information pertaining to the current streaming session: supported stream
+// protocols, input/output streams, if the client is requesting a TTY, and a terminal size queue to
+// support terminal resizing.
+type StreamOptions struct {
+	SupportedProtocols []string
+	Stdin              io.Reader
+	Stdout             io.Writer
+	Stderr             io.Writer
+	Tty                bool
+	TerminalSizeQueue  term.TerminalSizeQueue
+}
 
 // Executor is an interface for transporting shell-style streams.
 type Executor interface {
@@ -35,7 +50,7 @@ type Executor interface {
 	// non-nil stream to a remote system, and return an error if a problem occurs. If tty
 	// is set, the stderr stream is not used (raw TTY manages stdout and stderr over the
 	// stdout stream).
-	Stream(stdin io.Reader, stdout, stderr io.Writer, tty bool) error
+	Stream(options StreamOptions) error
 }
 
 // StreamExecutor supports the ability to dial an httpstream connection and the ability to
@@ -58,14 +73,14 @@ type streamExecutor struct {
 // multiplexed bidirectional streams. The current implementation uses SPDY,
 // but this could be replaced with HTTP/2 once it's available, or something else.
 // TODO: the common code between this and portforward could be abstracted.
-func NewExecutor(config *client.Config, method string, url *url.URL) (StreamExecutor, error) {
-	tlsConfig, err := client.TLSConfigFor(config)
+func NewExecutor(config *restclient.Config, method string, url *url.URL) (StreamExecutor, error) {
+	tlsConfig, err := restclient.TLSConfigFor(config)
 	if err != nil {
 		return nil, err
 	}
 
 	upgradeRoundTripper := spdy.NewRoundTripper(tlsConfig)
-	wrapper, err := client.HTTPWrappersForConfig(config, upgradeRoundTripper)
+	wrapper, err := restclient.HTTPWrappersForConfig(config, upgradeRoundTripper)
 	if err != nil {
 		return nil, err
 	}
@@ -99,22 +114,11 @@ func NewStreamExecutor(upgrader httpstream.UpgradeRoundTripper, fn func(http.Rou
 // connection. Upon success, it returns the connection and the protocol
 // selected by the server.
 func (e *streamExecutor) Dial(protocols ...string) (httpstream.Connection, string, error) {
-	transport := e.transport
-	// TODO consider removing this and reusing client.TransportFor above to get this for free
-	switch {
-	case bool(glog.V(9)):
-		transport = client.NewDebuggingRoundTripper(transport, client.CurlCommand, client.URLTiming, client.ResponseHeaders)
-	case bool(glog.V(8)):
-		transport = client.NewDebuggingRoundTripper(transport, client.JustURL, client.RequestHeaders, client.ResponseStatus, client.ResponseHeaders)
-	case bool(glog.V(7)):
-		transport = client.NewDebuggingRoundTripper(transport, client.JustURL, client.RequestHeaders, client.ResponseStatus)
-	case bool(glog.V(6)):
-		transport = client.NewDebuggingRoundTripper(transport, client.URLTiming)
-	}
+	rt := transport.DebugWrappers(e.transport)
 
 	// TODO the client probably shouldn't be created here, as it doesn't allow
 	// flexibility to allow callers to configure it.
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: rt}
 
 	req, err := http.NewRequest(e.method, e.url.String(), nil)
 	if err != nil {
@@ -130,10 +134,6 @@ func (e *streamExecutor) Dial(protocols ...string) (httpstream.Connection, strin
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		return nil, "", fmt.Errorf("unexpected response status code %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-
 	conn, err := e.upgrader.NewConnection(resp)
 	if err != nil {
 		return nil, "", err
@@ -142,27 +142,18 @@ func (e *streamExecutor) Dial(protocols ...string) (httpstream.Connection, strin
 	return conn, resp.Header.Get(httpstream.HeaderProtocolVersion), nil
 }
 
-const (
-	// The SPDY subprotocol "channel.k8s.io" is used for remote command
-	// attachment/execution. This represents the initial unversioned subprotocol,
-	// which has the known bugs http://issues.k8s.io/13394 and
-	// http://issues.k8s.io/13395.
-	StreamProtocolV1Name = "channel.k8s.io"
-	// The SPDY subprotocol "v2.channel.k8s.io" is used for remote command
-	// attachment/execution. It is the second version of the subprotocol and
-	// resolves the issues present in the first version.
-	StreamProtocolV2Name = "v2.channel.k8s.io"
-)
+type streamCreator interface {
+	CreateStream(headers http.Header) (httpstream.Stream, error)
+}
 
 type streamProtocolHandler interface {
-	stream(httpstream.Connection) error
+	stream(conn streamCreator) error
 }
 
 // Stream opens a protocol streamer to the server and streams until a client closes
 // the connection or the server disconnects.
-func (e *streamExecutor) Stream(stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
-	supportedProtocols := []string{StreamProtocolV2Name, StreamProtocolV1Name}
-	conn, protocol, err := e.Dial(supportedProtocols...)
+func (e *streamExecutor) Stream(options StreamOptions) error {
+	conn, protocol, err := e.Dial(options.SupportedProtocols...)
 	if err != nil {
 		return err
 	}
@@ -171,23 +162,15 @@ func (e *streamExecutor) Stream(stdin io.Reader, stdout, stderr io.Writer, tty b
 	var streamer streamProtocolHandler
 
 	switch protocol {
-	case StreamProtocolV2Name:
-		streamer = &streamProtocolV2{
-			stdin:  stdin,
-			stdout: stdout,
-			stderr: stderr,
-			tty:    tty,
-		}
+	case remotecommand.StreamProtocolV3Name:
+		streamer = newStreamProtocolV3(options)
+	case remotecommand.StreamProtocolV2Name:
+		streamer = newStreamProtocolV2(options)
 	case "":
-		glog.V(4).Infof("The server did not negotiate a streaming protocol version. Falling back to %s", StreamProtocolV1Name)
+		glog.V(4).Infof("The server did not negotiate a streaming protocol version. Falling back to %s", remotecommand.StreamProtocolV1Name)
 		fallthrough
-	case StreamProtocolV1Name:
-		streamer = &streamProtocolV1{
-			stdin:  stdin,
-			stdout: stdout,
-			stderr: stderr,
-			tty:    tty,
-		}
+	case remotecommand.StreamProtocolV1Name:
+		streamer = newStreamProtocolV1(options)
 	}
 
 	return streamer.stream(conn)

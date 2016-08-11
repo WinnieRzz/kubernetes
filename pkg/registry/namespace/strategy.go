@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // namespaceStrategy implements behavior for Namespaces
@@ -77,9 +77,13 @@ func (namespaceStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new namespace.
-func (namespaceStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	namespace := obj.(*api.Namespace)
 	return validation.ValidateNamespace(namespace)
+}
+
+// Canonicalize normalizes the object after validation.
+func (namespaceStrategy) Canonicalize(obj runtime.Object) {
 }
 
 // AllowCreateOnUpdate is false for namespaces.
@@ -88,7 +92,7 @@ func (namespaceStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (namespaceStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	errorList := validation.ValidateNamespace(obj.(*api.Namespace))
 	return append(errorList, validation.ValidateNamespaceUpdate(obj.(*api.Namespace), old.(*api.Namespace))...)
 }
@@ -109,7 +113,7 @@ func (namespaceStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 	newNamespace.Spec = oldNamespace.Spec
 }
 
-func (namespaceStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateNamespaceStatusUpdate(obj.(*api.Namespace), old.(*api.Namespace))
 }
 
@@ -119,7 +123,7 @@ type namespaceFinalizeStrategy struct {
 
 var FinalizeStrategy = namespaceFinalizeStrategy{Strategy}
 
-func (namespaceFinalizeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceFinalizeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateNamespaceFinalizeUpdate(obj.(*api.Namespace), old.(*api.Namespace))
 }
 
@@ -144,7 +148,7 @@ func MatchNamespace(label labels.Selector, field fields.Selector) generic.Matche
 
 // NamespaceToSelectableFields returns a label set that represents the object
 func NamespaceToSelectableFields(namespace *api.Namespace) labels.Set {
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(namespace.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(namespace.ObjectMeta, false)
 	specificFieldsSet := fields.Set{
 		"status.phase": string(namespace.Status.Phase),
 		// This is a bug, but we need to support it for backward compatibility.

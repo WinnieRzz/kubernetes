@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
 	"github.com/golang/glog"
@@ -35,27 +36,30 @@ import (
 // referencing the cmd.Flags()
 type ReplaceOptions struct {
 	Filenames []string
+	Recursive bool
 }
 
-const (
-	replace_long = `Replace a resource by filename or stdin.
+var (
+	replace_long = dedent.Dedent(`
+		Replace a resource by filename or stdin.
 
-JSON and YAML formats are accepted. If replacing an existing resource, the
-complete resource spec must be provided. This can be obtained by
-$ kubectl get TYPE NAME -o yaml
+		JSON and YAML formats are accepted. If replacing an existing resource, the
+		complete resource spec must be provided. This can be obtained by
+		$ kubectl get TYPE NAME -o yaml
 
-Please refer to the models in https://htmlpreview.github.io/?https://github.com/kubernetes/kubernetes/HEAD/docs/api-reference/v1/definitions.html to find if a field is mutable.`
-	replace_example = `# Replace a pod using the data in pod.json.
-$ kubectl replace -f ./pod.json
+		Please refer to the models in https://htmlpreview.github.io/?https://github.com/kubernetes/kubernetes/blob/HEAD/docs/api-reference/v1/definitions.html to find if a field is mutable.`)
+	replace_example = dedent.Dedent(`
+		# Replace a pod using the data in pod.json.
+		kubectl replace -f ./pod.json
 
-# Replace a pod based on the JSON passed into stdin.
-$ cat pod.json | kubectl replace -f -
+		# Replace a pod based on the JSON passed into stdin.
+		cat pod.json | kubectl replace -f -
 
-# Update a single-container pod's image version (tag) to v4
-kubectl get pod mypod -o yaml | sed 's/\(image: myimage\):.*$/\1:v4/' | kubectl replace -f -
+		# Update a single-container pod's image version (tag) to v4
+		kubectl get pod mypod -o yaml | sed 's/\(image: myimage\):.*$/\1:v4/' | kubectl replace -f -
 
-# Force replace, delete and then re-create the resource
-kubectl replace --force -f ./pod.json`
+		# Force replace, delete and then re-create the resource
+		kubectl replace --force -f ./pod.json`)
 )
 
 func NewCmdReplace(f *cmdutil.Factory, out io.Writer) *cobra.Command {
@@ -65,7 +69,7 @@ func NewCmdReplace(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 		Use: "replace -f FILENAME",
 		// update is deprecated.
 		Aliases: []string{"update"},
-		Short:   "Replace a resource by filename or stdin.",
+		Short:   "Replace a resource by filename or stdin",
 		Long:    replace_long,
 		Example: replace_example,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -80,9 +84,14 @@ func NewCmdReplace(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().Bool("force", false, "Delete and re-create the specified resource")
 	cmd.Flags().Bool("cascade", false, "Only relevant during a force replace. If true, cascade the deletion of the resources managed by this resource (e.g. Pods created by a ReplicationController).")
 	cmd.Flags().Int("grace-period", -1, "Only relevant during a force replace. Period of time in seconds given to the old resource to terminate gracefully. Ignored if negative.")
-	cmd.Flags().Duration("timeout", 0, "Only relevant during a force replace. The length of time to wait before giving up on a delete of the old resource, zero means determine a timeout from the size of the object")
+	cmd.Flags().Duration("timeout", 0, "Only relevant during a force replace. The length of time to wait before giving up on a delete of the old resource, zero means determine a timeout from the size of the object. Any other values should contain a corresponding time unit (e.g. 1s, 2m, 3h).")
 	cmdutil.AddValidateFlags(cmd)
+	cmdutil.AddRecursiveFlag(cmd, &options.Recursive)
 	cmdutil.AddOutputFlagsForMutation(cmd)
+	cmdutil.AddApplyAnnotationFlags(cmd)
+	cmdutil.AddRecordFlag(cmd)
+	cmdutil.AddInclude3rdPartyFlags(cmd)
+
 	return cmd
 }
 
@@ -110,12 +119,12 @@ func RunReplace(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []st
 		return forceReplace(f, out, cmd, args, shortOutput, options)
 	}
 
-	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	mapper, typer := f.Object(cmdutil.GetIncludeThirdPartyAPIs(cmd))
+	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
-		FilenameParam(enforceNamespace, options.Filenames...).
+		FilenameParam(enforceNamespace, options.Recursive, options.Filenames...).
 		Flatten().
 		Do()
 	err = r.Err()
@@ -128,24 +137,24 @@ func RunReplace(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []st
 			return err
 		}
 
-		// Serialize the configuration into an annotation.
-		if err := kubectl.UpdateApplyAnnotation(info); err != nil {
-			return err
-		}
-
-		// Serialize the object with the annotation applied.
-		data, err := info.Mapping.Codec.Encode(info.Object)
-		if err != nil {
+		if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), info, f.JSONEncoder()); err != nil {
 			return cmdutil.AddSourceToErr("replacing", info.Source, err)
 		}
 
-		obj, err := resource.NewHelper(info.Client, info.Mapping).Replace(info.Namespace, info.Name, true, data)
+		if cmdutil.ShouldRecord(cmd, info) {
+			if err := cmdutil.RecordChangeCause(info.Object, f.Command()); err != nil {
+				return cmdutil.AddSourceToErr("replacing", info.Source, err)
+			}
+		}
+
+		// Serialize the object with the annotation applied.
+		obj, err := resource.NewHelper(info.Client, info.Mapping).Replace(info.Namespace, info.Name, true, info.Object)
 		if err != nil {
 			return cmdutil.AddSourceToErr("replacing", info.Source, err)
 		}
 
 		info.Refresh(obj, true)
-		printObjectSpecificMessage(obj, out)
+		f.PrintObjectSpecificMessage(obj, out)
 		cmdutil.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, "replaced")
 		return nil
 	})
@@ -178,11 +187,11 @@ func forceReplace(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 		}
 	}
 
-	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	mapper, typer := f.Object(cmdutil.GetIncludeThirdPartyAPIs(cmd))
+	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
-		FilenameParam(enforceNamespace, options.Filenames...).
+		FilenameParam(enforceNamespace, options.Recursive, options.Filenames...).
 		ResourceTypeOrNameArgs(false, args...).RequireObject(false).
 		Flatten().
 		Do()
@@ -203,11 +212,11 @@ func forceReplace(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 		return err
 	}
 
-	r = resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	r = resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
-		FilenameParam(enforceNamespace, options.Filenames...).
+		FilenameParam(enforceNamespace, options.Recursive, options.Filenames...).
 		Flatten().
 		Do()
 	err = r.Err()
@@ -221,25 +230,24 @@ func forceReplace(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 			return err
 		}
 
-		// Serialize the configuration into an annotation.
-		if err := kubectl.UpdateApplyAnnotation(info); err != nil {
+		if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), info, f.JSONEncoder()); err != nil {
 			return err
 		}
 
-		// Serialize the object with the annotation applied.
-		data, err := info.Mapping.Codec.Encode(info.Object)
-		if err != nil {
-			return err
+		if cmdutil.ShouldRecord(cmd, info) {
+			if err := cmdutil.RecordChangeCause(info.Object, f.Command()); err != nil {
+				return cmdutil.AddSourceToErr("replacing", info.Source, err)
+			}
 		}
 
-		obj, err := resource.NewHelper(info.Client, info.Mapping).Create(info.Namespace, true, data)
+		obj, err := resource.NewHelper(info.Client, info.Mapping).Create(info.Namespace, true, info.Object)
 		if err != nil {
 			return err
 		}
 
 		count++
 		info.Refresh(obj, true)
-		printObjectSpecificMessage(obj, out)
+		f.PrintObjectSpecificMessage(obj, out)
 		cmdutil.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, "replaced")
 		return nil
 	})

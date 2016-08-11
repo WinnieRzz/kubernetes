@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,18 +20,20 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/tools"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/storage"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
+	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
 )
 
-func newStorage(t *testing.T) (*ScaleREST, *tools.FakeEtcdClient) {
-	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "")
-	return NewStorage(etcdStorage).Scale, fakeClient
+func newStorage(t *testing.T) (*ScaleREST, *etcdtesting.EtcdTestServer, storage.Interface) {
+	etcdStorage, server := registrytest.NewEtcdStorage(t, "")
+	restOptions := generic.RESTOptions{Storage: etcdStorage, Decorator: generic.UndecoratedStorage, DeleteCollectionWorkers: 1, ResourcePrefix: "controllers"}
+	return NewStorage(restOptions).Scale, server, etcdStorage
 }
 
 var validPodTemplate = api.PodTemplate{
@@ -53,7 +55,7 @@ var validPodTemplate = api.PodTemplate{
 	},
 }
 
-var validReplicas = 8
+var validReplicas = int32(8)
 
 var validControllerSpec = api.ReplicationControllerSpec{
 	Replicas: validReplicas,
@@ -62,7 +64,7 @@ var validControllerSpec = api.ReplicationControllerSpec{
 }
 
 var validController = api.ReplicationController{
-	ObjectMeta: api.ObjectMeta{Name: "foo", Namespace: "test", ResourceVersion: "1"},
+	ObjectMeta: api.ObjectMeta{Name: "foo", Namespace: "test"},
 	Spec:       validControllerSpec,
 }
 
@@ -73,39 +75,41 @@ var validScale = extensions.Scale{
 	},
 	Status: extensions.ScaleStatus{
 		Replicas: 0,
-		Selector: validPodTemplate.Template.Labels,
+		Selector: &unversioned.LabelSelector{
+			MatchLabels: validPodTemplate.Template.Labels,
+		},
 	},
 }
 
 func TestGet(t *testing.T) {
-	storage, fakeClient := newStorage(t)
+	storage, server, si := newStorage(t)
+	defer server.Terminate(t)
 
 	ctx := api.WithNamespace(api.NewContext(), "test")
 	key := etcdtest.AddPrefix("/controllers/test/foo")
-	if _, err := fakeClient.Set(key, runtime.EncodeOrDie(testapi.Default.Codec(), &validController), 0); err != nil {
+	if err := si.Create(ctx, key, &validController, nil, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	expect := &validScale
 	obj, err := storage.Get(ctx, "foo")
-	scale := obj.(*extensions.Scale)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if e, a := expect, scale; !api.Semantic.DeepEqual(e, a) {
-		t.Errorf("unexpected scale: %s", util.ObjectDiff(e, a))
+	scale := obj.(*extensions.Scale)
+	if scale.Spec.Replicas != validReplicas {
+		t.Errorf("wrong replicas count expected: %d got: %d", validReplicas, scale.Spec.Replicas)
 	}
 }
 
 func TestUpdate(t *testing.T) {
-	storage, fakeClient := newStorage(t)
+	storage, server, si := newStorage(t)
+	defer server.Terminate(t)
 
 	ctx := api.WithNamespace(api.NewContext(), "test")
 	key := etcdtest.AddPrefix("/controllers/test/foo")
-	if _, err := fakeClient.Set(key, runtime.EncodeOrDie(testapi.Default.Codec(), &validController), 0); err != nil {
+	if err := si.Create(ctx, key, &validController, nil, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	replicas := 12
+	replicas := int32(12)
 	update := extensions.Scale{
 		ObjectMeta: api.ObjectMeta{Name: "foo", Namespace: "test"},
 		Spec: extensions.ScaleSpec{
@@ -113,17 +117,16 @@ func TestUpdate(t *testing.T) {
 		},
 	}
 
-	if _, _, err := storage.Update(ctx, &update); err != nil {
+	if _, _, err := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(&update, api.Scheme)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	response, err := fakeClient.Get(key, false, false)
+	obj, err := storage.Get(ctx, "foo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var controller api.ReplicationController
-	testapi.Extensions.Codec().DecodeInto([]byte(response.Node.Value), &controller)
-	if controller.Spec.Replicas != replicas {
-		t.Errorf("wrong replicas count expected: %d got: %d", replicas, controller.Spec.Replicas)
+	updated := obj.(*extensions.Scale)
+	if updated.Spec.Replicas != replicas {
+		t.Errorf("wrong replicas count expected: %d got: %d", replicas, updated.Spec.Replicas)
 	}
 }

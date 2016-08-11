@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // daemonSetStrategy implements verification logic for daemon sets.
@@ -77,9 +77,13 @@ func (daemonSetStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new daemon set.
-func (daemonSetStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (daemonSetStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	daemonSet := obj.(*extensions.DaemonSet)
 	return validation.ValidateDaemonSet(daemonSet)
+}
+
+// Canonicalize normalizes the object after validation.
+func (daemonSetStrategy) Canonicalize(obj runtime.Object) {
 }
 
 // AllowCreateOnUpdate is false for daemon set; this means a POST is
@@ -89,9 +93,9 @@ func (daemonSetStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (daemonSetStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (daemonSetStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	validationErrorList := validation.ValidateDaemonSet(obj.(*extensions.DaemonSet))
-	updateErrorList := validation.ValidateDaemonSetUpdate(old.(*extensions.DaemonSet), obj.(*extensions.DaemonSet))
+	updateErrorList := validation.ValidateDaemonSetUpdate(obj.(*extensions.DaemonSet), old.(*extensions.DaemonSet))
 	return append(validationErrorList, updateErrorList...)
 }
 
@@ -102,7 +106,7 @@ func (daemonSetStrategy) AllowUnconditionalUpdate() bool {
 
 // DaemonSetToSelectableFields returns a field set that represents the object.
 func DaemonSetToSelectableFields(daemon *extensions.DaemonSet) fields.Set {
-	return generic.ObjectMetaFieldsSet(daemon.ObjectMeta)
+	return generic.ObjectMetaFieldsSet(daemon.ObjectMeta, true)
 }
 
 // MatchSetDaemon is the filter used by the generic etcd backend to route
@@ -134,6 +138,6 @@ func (daemonSetStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 	newDaemonSet.Spec = oldDaemonSet.Spec
 }
 
-func (daemonSetStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (daemonSetStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateDaemonSetStatusUpdate(obj.(*extensions.DaemonSet), old.(*extensions.DaemonSet))
 }

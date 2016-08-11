@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,16 +23,18 @@ import (
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/tools"
-	"k8s.io/kubernetes/pkg/util"
+	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
-func newStorage(t *testing.T) (*REST, *StatusREST, *tools.FakeEtcdClient) {
-	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "extensions")
-	ingressStorage, statusStorage := NewREST(etcdStorage)
-	return ingressStorage, statusStorage, fakeClient
+func newStorage(t *testing.T) (*REST, *StatusREST, *etcdtesting.EtcdTestServer) {
+	etcdStorage, server := registrytest.NewEtcdStorage(t, extensions.GroupName)
+	restOptions := generic.RESTOptions{Storage: etcdStorage, Decorator: generic.UndecoratedStorage, DeleteCollectionWorkers: 1}
+	ingressStorage, statusStorage := NewREST(restOptions)
+	return ingressStorage, statusStorage, server
 }
 
 var (
@@ -40,10 +42,13 @@ var (
 	name                = "foo-ingress"
 	defaultHostname     = "foo.bar.com"
 	defaultBackendName  = "default-backend"
-	defaultBackendPort  = util.IntOrString{Kind: util.IntstrInt, IntVal: 80}
+	defaultBackendPort  = intstr.FromInt(80)
 	defaultLoadBalancer = "127.0.0.1"
 	defaultPath         = "/foo"
 	defaultPathMap      = map[string]string{defaultPath: defaultBackendName}
+	defaultTLS          = []extensions.IngressTLS{
+		{Hosts: []string{"foo.bar.com", "*.bar.com"}, SecretName: "fooSecret"},
+	}
 )
 
 type IngressRuleValues map[string]string
@@ -91,6 +96,7 @@ func newIngress(pathMap map[string]string) *extensions.Ingress {
 			Rules: toIngressRules(map[string]IngressRuleValues{
 				defaultHostname: pathMap,
 			}),
+			TLS: defaultTLS,
 		},
 		Status: extensions.IngressStatus{
 			LoadBalancer: api.LoadBalancerStatus{
@@ -107,8 +113,9 @@ func validIngress() *extensions.Ingress {
 }
 
 func TestCreate(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	ingress := validIngress()
 	noDefaultBackendAndRules := validIngress()
 	noDefaultBackendAndRules.Spec.Backend = &extensions.IngressBackend{}
@@ -125,8 +132,9 @@ func TestCreate(t *testing.T) {
 }
 
 func TestUpdate(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestUpdate(
 		// valid
 		validIngress(),
@@ -136,15 +144,13 @@ func TestUpdate(t *testing.T) {
 			object.Spec.Rules = toIngressRules(map[string]IngressRuleValues{
 				"bar.foo.com": {"/bar": defaultBackendName},
 			})
+			object.Spec.TLS = append(object.Spec.TLS, extensions.IngressTLS{
+				Hosts:      []string{"*.google.com"},
+				SecretName: "googleSecret",
+			})
 			return object
 		},
 		// invalid updateFunc: ObjeceMeta is not to be tampered with.
-		func(obj runtime.Object) runtime.Object {
-			object := obj.(*extensions.Ingress)
-			object.UID = "newUID"
-			return object
-		},
-
 		func(obj runtime.Object) runtime.Object {
 			object := obj.(*extensions.Ingress)
 			object.Name = ""
@@ -161,26 +167,30 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestDelete(validIngress())
 }
 
 func TestGet(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestGet(validIngress())
 }
 
 func TestList(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestList(validIngress())
 }
 
 func TestWatch(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestWatch(
 		validIngress(),
 		// matching labels

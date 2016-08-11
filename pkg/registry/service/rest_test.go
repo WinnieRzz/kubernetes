@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,12 +24,12 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	"k8s.io/kubernetes/pkg/registry/service/ipallocator"
 	"k8s.io/kubernetes/pkg/registry/service/portallocator"
-	"k8s.io/kubernetes/pkg/util"
+	utilnet "k8s.io/kubernetes/pkg/util/net"
+
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 // TODO(wojtek-t): Cleanup this file.
@@ -43,12 +43,12 @@ func NewTestREST(t *testing.T, endpoints *api.EndpointsList) (*REST, *registryte
 	}
 	r := ipallocator.NewCIDRRange(makeIPNet(t))
 
-	portRange := util.PortRange{Base: 30000, Size: 1000}
+	portRange := utilnet.PortRange{Base: 30000, Size: 1000}
 	portAllocator := portallocator.NewPortAllocator(portRange)
 
 	storage := NewStorage(registry, endpointRegistry, r, portAllocator, nil)
 
-	return storage, registry
+	return storage.Service, registry
 }
 
 func makeIPNet(t *testing.T) *net.IPNet {
@@ -79,7 +79,7 @@ func TestServiceRegistryCreate(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
@@ -122,7 +122,7 @@ func TestServiceStorageValidatesCreate(t *testing.T) {
 				Ports: []api.ServicePort{{
 					Port:       6502,
 					Protocol:   api.ProtocolTCP,
-					TargetPort: util.NewIntOrStringFromInt(6502),
+					TargetPort: intstr.FromInt(6502),
 				}},
 			},
 		},
@@ -172,7 +172,7 @@ func TestServiceRegistryUpdate(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	})
@@ -180,7 +180,7 @@ func TestServiceRegistryUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected no error: %v", err)
 	}
-	updated_svc, created, err := storage.Update(ctx, &api.Service{
+	updated_svc, created, err := storage.Update(ctx, "foo", rest.DefaultUpdatedObjectInfo(&api.Service{
 		ObjectMeta: api.ObjectMeta{
 			Name:            "foo",
 			ResourceVersion: svc.ResourceVersion},
@@ -191,10 +191,10 @@ func TestServiceRegistryUpdate(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
-	})
+	}, api.Scheme))
 	if err != nil {
 		t.Fatalf("Expected no error: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestServiceStorageValidatesUpdate(t *testing.T) {
 				Ports: []api.ServicePort{{
 					Port:       6502,
 					Protocol:   api.ProtocolTCP,
-					TargetPort: util.NewIntOrStringFromInt(6502),
+					TargetPort: intstr.FromInt(6502),
 				}},
 			},
 		},
@@ -249,13 +249,13 @@ func TestServiceStorageValidatesUpdate(t *testing.T) {
 				Ports: []api.ServicePort{{
 					Port:       6502,
 					Protocol:   api.ProtocolTCP,
-					TargetPort: util.NewIntOrStringFromInt(6502),
+					TargetPort: intstr.FromInt(6502),
 				}},
 			},
 		},
 	}
 	for _, failureCase := range failureCases {
-		c, created, err := storage.Update(ctx, &failureCase)
+		c, created, err := storage.Update(ctx, failureCase.Name, rest.DefaultUpdatedObjectInfo(&failureCase, api.Scheme))
 		if c != nil || created {
 			t.Errorf("Expected nil object or created false")
 		}
@@ -277,7 +277,7 @@ func TestServiceRegistryExternalService(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
@@ -352,7 +352,7 @@ func TestServiceRegistryUpdateExternalService(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
@@ -363,14 +363,14 @@ func TestServiceRegistryUpdateExternalService(t *testing.T) {
 	// Modify load balancer to be external.
 	svc2 := deepCloneService(svc1)
 	svc2.Spec.Type = api.ServiceTypeLoadBalancer
-	if _, _, err := storage.Update(ctx, svc2); err != nil {
+	if _, _, err := storage.Update(ctx, svc2.Name, rest.DefaultUpdatedObjectInfo(svc2, api.Scheme)); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	// Change port.
 	svc3 := deepCloneService(svc2)
 	svc3.Spec.Ports[0].Port = 6504
-	if _, _, err := storage.Update(ctx, svc3); err != nil {
+	if _, _, err := storage.Update(ctx, svc3.Name, rest.DefaultUpdatedObjectInfo(svc3, api.Scheme)); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
@@ -390,12 +390,12 @@ func TestServiceRegistryUpdateMultiPortExternalService(t *testing.T) {
 				Name:       "p",
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}, {
 				Name:       "q",
 				Port:       8086,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(8086),
+				TargetPort: intstr.FromInt(8086),
 			}},
 		},
 	}
@@ -406,7 +406,7 @@ func TestServiceRegistryUpdateMultiPortExternalService(t *testing.T) {
 	// Modify ports
 	svc2 := deepCloneService(svc1)
 	svc2.Spec.Ports[1].Port = 8088
-	if _, _, err := storage.Update(ctx, svc2); err != nil {
+	if _, _, err := storage.Update(ctx, svc2.Name, rest.DefaultUpdatedObjectInfo(svc2, api.Scheme)); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
@@ -463,6 +463,14 @@ func TestServiceRegistryResourceLocation(t *testing.T) {
 		ObjectMeta: api.ObjectMeta{Name: "foo"},
 		Spec: api.ServiceSpec{
 			Selector: map[string]string{"bar": "baz"},
+			Ports: []api.ServicePort{
+				// Service port 9393 should route to endpoint port "p", which is port 93
+				{Name: "p", Port: 9393, TargetPort: intstr.FromString("p")},
+
+				// Service port 93 should route to unnamed endpoint port, which is port 80
+				// This is to test that the service port definition is used when determining resource location
+				{Name: "", Port: 93, TargetPort: intstr.FromInt(80)},
+			},
 		},
 	})
 	redirector := rest.Redirector(storage)
@@ -491,8 +499,20 @@ func TestServiceRegistryResourceLocation(t *testing.T) {
 		t.Errorf("Expected %v, but got %v", e, a)
 	}
 
-	// Test a name + port number.
+	// Test a name + port number (service port 93 -> target port 80)
 	location, _, err = redirector.ResourceLocation(ctx, "foo:93")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if location == nil {
+		t.Errorf("Unexpected nil: %v", location)
+	}
+	if e, a := "//1.2.3.4:80", location.String(); e != a {
+		t.Errorf("Expected %v, but got %v", e, a)
+	}
+
+	// Test a name + port number (service port 9393 -> target port "p" -> endpoint port 93)
+	location, _, err = redirector.ResourceLocation(ctx, "foo:9393")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -543,7 +563,7 @@ func TestServiceRegistryList(t *testing.T) {
 		},
 	})
 	registry.List.ResourceVersion = "1"
-	s, _ := storage.List(ctx, labels.Everything(), fields.Everything())
+	s, _ := storage.List(ctx, nil)
 	sl := s.(*api.ServiceList)
 	if len(sl.Items) != 2 {
 		t.Fatalf("Expected 2 services, but got %v", len(sl.Items))
@@ -560,7 +580,7 @@ func TestServiceRegistryList(t *testing.T) {
 }
 
 func TestServiceRegistryIPAllocation(t *testing.T) {
-	rest, _ := NewTestREST(t, nil)
+	storage, _ := NewTestREST(t, nil)
 
 	svc1 := &api.Service{
 		ObjectMeta: api.ObjectMeta{Name: "foo"},
@@ -571,12 +591,12 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
 	ctx := api.NewDefaultContext()
-	created_svc1, _ := rest.Create(ctx, svc1)
+	created_svc1, _ := storage.Create(ctx, svc1)
 	created_service_1 := created_svc1.(*api.Service)
 	if created_service_1.Name != "foo" {
 		t.Errorf("Expected foo, but got %v", created_service_1.Name)
@@ -594,11 +614,11 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		}}
 	ctx = api.NewDefaultContext()
-	created_svc2, _ := rest.Create(ctx, svc2)
+	created_svc2, _ := storage.Create(ctx, svc2)
 	created_service_2 := created_svc2.(*api.Service)
 	if created_service_2.Name != "bar" {
 		t.Errorf("Expected bar, but got %v", created_service_2.Name)
@@ -610,7 +630,7 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 	testIPs := []string{"1.2.3.93", "1.2.3.94", "1.2.3.95", "1.2.3.96"}
 	testIP := ""
 	for _, ip := range testIPs {
-		if !rest.serviceIPs.(*ipallocator.Range).Has(net.ParseIP(ip)) {
+		if !storage.serviceIPs.(*ipallocator.Range).Has(net.ParseIP(ip)) {
 			testIP = ip
 			break
 		}
@@ -626,12 +646,12 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
 	ctx = api.NewDefaultContext()
-	created_svc3, err := rest.Create(ctx, svc3)
+	created_svc3, err := storage.Create(ctx, svc3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +662,7 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 }
 
 func TestServiceRegistryIPReallocation(t *testing.T) {
-	rest, _ := NewTestREST(t, nil)
+	storage, _ := NewTestREST(t, nil)
 
 	svc1 := &api.Service{
 		ObjectMeta: api.ObjectMeta{Name: "foo"},
@@ -653,12 +673,12 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
 	ctx := api.NewDefaultContext()
-	created_svc1, _ := rest.Create(ctx, svc1)
+	created_svc1, _ := storage.Create(ctx, svc1)
 	created_service_1 := created_svc1.(*api.Service)
 	if created_service_1.Name != "foo" {
 		t.Errorf("Expected foo, but got %v", created_service_1.Name)
@@ -667,7 +687,7 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 		t.Errorf("Unexpected ClusterIP: %s", created_service_1.Spec.ClusterIP)
 	}
 
-	_, err := rest.Delete(ctx, created_service_1.Name)
+	_, err := storage.Delete(ctx, created_service_1.Name)
 	if err != nil {
 		t.Errorf("Unexpected error deleting service: %v", err)
 	}
@@ -681,12 +701,12 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
 	ctx = api.NewDefaultContext()
-	created_svc2, _ := rest.Create(ctx, svc2)
+	created_svc2, _ := storage.Create(ctx, svc2)
 	created_service_2 := created_svc2.(*api.Service)
 	if created_service_2.Name != "bar" {
 		t.Errorf("Expected bar, but got %v", created_service_2.Name)
@@ -697,7 +717,7 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 }
 
 func TestServiceRegistryIPUpdate(t *testing.T) {
-	rest, _ := NewTestREST(t, nil)
+	storage, _ := NewTestREST(t, nil)
 
 	svc := &api.Service{
 		ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"},
@@ -708,12 +728,12 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
 	ctx := api.NewDefaultContext()
-	created_svc, _ := rest.Create(ctx, svc)
+	created_svc, _ := storage.Create(ctx, svc)
 	created_service := created_svc.(*api.Service)
 	if created_service.Spec.Ports[0].Port != 6502 {
 		t.Errorf("Expected port 6502, but got %v", created_service.Spec.Ports[0].Port)
@@ -725,7 +745,7 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 	update := deepCloneService(created_service)
 	update.Spec.Ports[0].Port = 6503
 
-	updated_svc, _, _ := rest.Update(ctx, update)
+	updated_svc, _, _ := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update, api.Scheme))
 	updated_service := updated_svc.(*api.Service)
 	if updated_service.Spec.Ports[0].Port != 6503 {
 		t.Errorf("Expected port 6503, but got %v", updated_service.Spec.Ports[0].Port)
@@ -734,7 +754,7 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 	testIPs := []string{"1.2.3.93", "1.2.3.94", "1.2.3.95", "1.2.3.96"}
 	testIP := ""
 	for _, ip := range testIPs {
-		if !rest.serviceIPs.(*ipallocator.Range).Has(net.ParseIP(ip)) {
+		if !storage.serviceIPs.(*ipallocator.Range).Has(net.ParseIP(ip)) {
 			testIP = ip
 			break
 		}
@@ -744,14 +764,14 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 	update.Spec.Ports[0].Port = 6503
 	update.Spec.ClusterIP = testIP // Error: Cluster IP is immutable
 
-	_, _, err := rest.Update(ctx, update)
+	_, _, err := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update, api.Scheme))
 	if err == nil || !errors.IsInvalid(err) {
 		t.Errorf("Unexpected error type: %v", err)
 	}
 }
 
 func TestServiceRegistryIPLoadBalancer(t *testing.T) {
-	rest, _ := NewTestREST(t, nil)
+	storage, _ := NewTestREST(t, nil)
 
 	svc := &api.Service{
 		ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"},
@@ -762,12 +782,12 @@ func TestServiceRegistryIPLoadBalancer(t *testing.T) {
 			Ports: []api.ServicePort{{
 				Port:       6502,
 				Protocol:   api.ProtocolTCP,
-				TargetPort: util.NewIntOrStringFromInt(6502),
+				TargetPort: intstr.FromInt(6502),
 			}},
 		},
 	}
 	ctx := api.NewDefaultContext()
-	created_svc, _ := rest.Create(ctx, svc)
+	created_svc, _ := storage.Create(ctx, svc)
 	created_service := created_svc.(*api.Service)
 	if created_service.Spec.Ports[0].Port != 6502 {
 		t.Errorf("Expected port 6502, but got %v", created_service.Spec.Ports[0].Port)
@@ -778,20 +798,20 @@ func TestServiceRegistryIPLoadBalancer(t *testing.T) {
 
 	update := deepCloneService(created_service)
 
-	_, _, err := rest.Update(ctx, update)
+	_, _, err := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update, api.Scheme))
 	if err != nil {
 		t.Errorf("Unexpected error %v", err)
 	}
 }
 
 func TestUpdateServiceWithConflictingNamespace(t *testing.T) {
-	storage := REST{}
+	storage, _ := NewTestREST(t, nil)
 	service := &api.Service{
 		ObjectMeta: api.ObjectMeta{Name: "test", Namespace: "not-default"},
 	}
 
 	ctx := api.NewDefaultContext()
-	obj, created, err := storage.Update(ctx, service)
+	obj, created, err := storage.Update(ctx, service.Name, rest.DefaultUpdatedObjectInfo(service, api.Scheme))
 	if obj != nil || created {
 		t.Error("Expected a nil object, but we got a value or created was true")
 	}

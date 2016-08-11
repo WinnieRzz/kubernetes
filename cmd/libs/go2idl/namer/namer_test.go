@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,29 +27,29 @@ func TestNameStrategy(t *testing.T) {
 	u := types.Universe{}
 
 	// Add some types.
-	base := u.Get(types.Name{"foo/bar", "Baz"})
+	base := u.Type(types.Name{Package: "foo/bar", Name: "Baz"})
 	base.Kind = types.Struct
 
-	tmp := u.Get(types.Name{"", "[]bar.Baz"})
+	tmp := u.Type(types.Name{Package: "", Name: "[]bar.Baz"})
 	tmp.Kind = types.Slice
 	tmp.Elem = base
 
-	tmp = u.Get(types.Name{"", "map[string]bar.Baz"})
+	tmp = u.Type(types.Name{Package: "", Name: "map[string]bar.Baz"})
 	tmp.Kind = types.Map
 	tmp.Key = types.String
 	tmp.Elem = base
 
-	tmp = u.Get(types.Name{"foo/other", "Baz"})
+	tmp = u.Type(types.Name{Package: "foo/other", Name: "Baz"})
 	tmp.Kind = types.Struct
 	tmp.Members = []types.Member{{
 		Embedded: true,
 		Type:     base,
 	}}
 
-	u.Get(types.Name{"", "string"})
+	u.Type(types.Name{Package: "", Name: "string"})
 
 	o := Orderer{NewPublicNamer(0)}
-	order := o.Order(u)
+	order := o.OrderUniverse(u)
 	orderedNames := make([]string, len(order))
 	for i, t := range order {
 		orderedNames[i] = o.Name(t)
@@ -59,8 +59,8 @@ func TestNameStrategy(t *testing.T) {
 		t.Errorf("Wanted %#v, got %#v", e, a)
 	}
 
-	o = Orderer{NewRawNamer(nil)}
-	order = o.Order(u)
+	o = Orderer{NewRawNamer("my/package", nil)}
+	order = o.OrderUniverse(u)
 	orderedNames = make([]string, len(order))
 	for i, t := range order {
 		orderedNames[i] = o.Name(t)
@@ -71,8 +71,20 @@ func TestNameStrategy(t *testing.T) {
 		t.Errorf("Wanted %#v, got %#v", e, a)
 	}
 
+	o = Orderer{NewRawNamer("foo/bar", nil)}
+	order = o.OrderUniverse(u)
+	orderedNames = make([]string, len(order))
+	for i, t := range order {
+		orderedNames[i] = o.Name(t)
+	}
+
+	expect = []string{"Baz", "[]Baz", "map[string]Baz", "other.Baz", "string"}
+	if e, a := expect, orderedNames; !reflect.DeepEqual(e, a) {
+		t.Errorf("Wanted %#v, got %#v", e, a)
+	}
+
 	o = Orderer{NewPublicNamer(1)}
-	order = o.Order(u)
+	order = o.OrderUniverse(u)
 	orderedNames = make([]string, len(order))
 	for i, t := range order {
 		orderedNames[i] = o.Name(t)

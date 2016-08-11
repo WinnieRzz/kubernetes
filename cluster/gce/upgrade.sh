@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Kubernetes Authors All rights reserved.
+# Copyright 2015 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,7 +28,6 @@ if [[ "${KUBERNETES_PROVIDER:-gce}" != "gce" ]]; then
 fi
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
-source "${KUBE_ROOT}/cluster/kube-env.sh"
 source "${KUBE_ROOT}/cluster/kube-util.sh"
 
 function usage() {
@@ -60,7 +59,7 @@ function usage() {
 
   release_stable=$(gsutil cat gs://kubernetes-release/release/stable.txt)
   release_latest=$(gsutil cat gs://kubernetes-release/release/latest.txt)
-  ci_latest=$(gsutil cat gs://kubernetes-release/ci/latest.txt)
+  ci_latest=$(gsutil cat gs://kubernetes-release-dev/ci/latest.txt)
 
   echo "Right now, versions are as follows:"
   echo "  release/stable: ${0} ${release_stable}"
@@ -75,6 +74,7 @@ function upgrade-master() {
   get-kubeconfig-bearertoken
 
   detect-master
+  parse-master-env
 
   # Delete the master instance. Note that the master-pd is created
   # with auto-delete=no, so it should not be deleted.
@@ -117,35 +117,26 @@ function wait-for-master() {
 function prepare-upgrade() {
   ensure-temp-dir
   detect-project
+  write-cluster-name
   tars_from_version
 }
 
-
-# Reads kube-env metadata from first node in MINION_NAMES.
+# Reads kube-env metadata from first node in NODE_NAMES.
 #
 # Assumed vars:
-#   MINION_NAMES
+#   NODE_NAMES
 #   PROJECT
 #   ZONE
 function get-node-env() {
   # TODO(zmerlynn): Make this more reliable with retries.
-  gcloud compute --project ${PROJECT} ssh --zone ${ZONE} ${MINION_NAMES[0]} --command \
+  gcloud compute --project ${PROJECT} ssh --zone ${ZONE} ${NODE_NAMES[0]} --command \
     "curl --fail --silent -H 'Metadata-Flavor: Google' \
       'http://metadata/computeMetadata/v1/instance/attributes/kube-env'" 2>/dev/null
 }
 
-# Using provided node env, extracts value from provided key.
-#
-# Args:
-# $1 node env (kube-env of node; result of calling get-node-env)
-# $2 env key to use
-function get-env-val() {
-  echo "${1}" | grep ${2} | cut -d : -f 2 | cut -d \' -f 2
-}
-
 # Assumed vars:
 #   KUBE_VERSION
-#   MINION_SCOPES
+#   NODE_SCOPES
 #   NODE_INSTANCE_PREFIX
 #   PROJECT
 #   ZONE
@@ -167,13 +158,14 @@ function upgrade-nodes() {
 #
 # Assumed vars:
 #   KUBE_VERSION
-#   MINION_SCOPES
+#   NODE_SCOPES
 #   NODE_INSTANCE_PREFIX
 #   PROJECT
 #   ZONE
 #
 # Vars set:
 #   SANITIZED_VERSION
+#   INSTANCE_GROUPS
 #   KUBELET_TOKEN
 #   KUBE_PROXY_TOKEN
 #   CA_CERT_BASE64
@@ -184,12 +176,12 @@ function prepare-node-upgrade() {
   echo "== Preparing node upgrade (to ${KUBE_VERSION}). ==" >&2
   SANITIZED_VERSION=$(echo ${KUBE_VERSION} | sed 's/[\.\+]/-/g')
 
-  detect-minion-names
+  detect-node-names # sets INSTANCE_GROUPS
 
   # TODO(zmerlynn): Refactor setting scope flags.
   local scope_flags=
-  if [ -n "${MINION_SCOPES}" ]; then
-    scope_flags="--scopes ${MINION_SCOPES}"
+  if [ -n "${NODE_SCOPES}" ]; then
+    scope_flags="--scopes ${NODE_SCOPES}"
   else
     scope_flags="--no-scopes"
   fi
@@ -212,7 +204,7 @@ function prepare-node-upgrade() {
   local template_name=$(get-template-name-from-version ${SANITIZED_VERSION})
   create-node-instance-template "${template_name}"
   # The following is echo'd so that callers can get the template name.
-  echo $template_name
+  echo "Instance template name: ${template_name}"
   echo "== Finished preparing node upgrade (to ${KUBE_VERSION}). ==" >&2
 }
 
@@ -223,26 +215,54 @@ function do-node-upgrade() {
   # Do the actual upgrade.
   # NOTE(zmerlynn): If you are changing this gcloud command, update
   #                 test/e2e/cluster_upgrade.go to match this EXACTLY.
-  # TODO(zmerlynn): Remove this hack on July 29, 2015, when the migration to
-  #                 `gcloud alpha compute rolling-updates` is complete.
-  local subgroup="preview"
-  local exists=$(gcloud ${subgroup} rolling-updates -h &>/dev/null; echo $?) || true
-  if [[ "${exists}" != "0" ]]; then
-    subgroup="alpha compute"
-  fi
   local template_name=$(get-template-name-from-version ${SANITIZED_VERSION})
-  gcloud ${subgroup} rolling-updates \
-      --project="${PROJECT}" \
-      --zone="${ZONE}" \
-      start \
-      --group="${NODE_INSTANCE_PREFIX}-group" \
-      --template="${template_name}" \
-      --instance-startup-timeout=300s \
-      --max-num-concurrent-instances=1 \
-      --max-num-failed-instances=0 \
-      --min-instance-update-time=0s
+  local old_templates=()
+  local updates=()
+  for group in ${INSTANCE_GROUPS[@]}; do
+    old_templates+=($(gcloud compute instance-groups managed list \
+        --project="${PROJECT}" \
+        --zones="${ZONE}" \
+        --regexp="${group}" \
+        --format='value(instanceTemplate)' || true))
+    update=$(gcloud alpha compute rolling-updates \
+        --project="${PROJECT}" \
+        --zone="${ZONE}" \
+        start \
+        --group="${group}" \
+        --template="${template_name}" \
+        --instance-startup-timeout=300s \
+        --max-num-concurrent-instances=1 \
+        --max-num-failed-instances=0 \
+        --min-instance-update-time=0s 2>&1)
+    id=$(echo "${update}" | grep "Started" | cut -d '/' -f 11 | cut -d ']' -f 1)
+    updates+=("${id}")
+  done
 
-  # TODO(zmerlynn): Wait for the rolling-update to finish.
+  # Wait until rolling updates are finished.
+  for update in ${updates[@]}; do
+    while true; do
+      result=$(gcloud alpha compute rolling-updates \
+          --project="${PROJECT}" \
+          --zone="${ZONE}" \
+          describe \
+          ${update} \
+          --format='value(status)' || true)
+      if [ $result = "ROLLED_OUT" ]; then
+        echo "Rolling update ${update} is ${result} state and finished."
+        break
+      fi
+      echo "Rolling update ${update} is still in ${result} state."
+      sleep 10
+    done
+  done
+
+  # Remove the old templates.
+  for tmpl in ${old_templates[@]}; do
+    gcloud compute instance-templates delete \
+        --quiet \
+        --project="${PROJECT}" \
+        "${tmpl}" || true
+  done
 
   echo "== Finished upgrading nodes to ${KUBE_VERSION}. ==" >&2
 }

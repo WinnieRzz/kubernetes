@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package generator
 
 import (
+	"bytes"
 	"io"
 
 	"k8s.io/kubernetes/cmd/libs/go2idl/namer"
@@ -32,7 +33,7 @@ type Package interface {
 	Path() string
 
 	// Filter should return true if this package cares about this type.
-	// Otherwise, this type will be ommitted from the type ordering for
+	// Otherwise, this type will be omitted from the type ordering for
 	// this package.
 	Filter(*Context, *types.Type) bool
 
@@ -46,6 +47,22 @@ type Package interface {
 	// A Context is passed in case the list of generators depends on the
 	// input types.
 	Generators(*Context) []Generator
+}
+
+type File struct {
+	Name        string
+	FileType    string
+	PackageName string
+	Header      []byte
+	Imports     map[string]struct{}
+	Vars        bytes.Buffer
+	Consts      bytes.Buffer
+	Body        bytes.Buffer
+}
+
+type FileType interface {
+	AssembleFile(f *File, path string) error
+	VerifyFile(f *File, path string) error
 }
 
 // Packages is a list of packages to generate.
@@ -120,6 +137,10 @@ type Generator interface {
 	// TODO: provide per-file import tracking, removing the requirement
 	// that generators coordinate..
 	Filename() string
+
+	// A registered file type in the context to generate this file with. If
+	// the FileType is not found in the context, execution will stop.
+	FileType() string
 }
 
 // Context is global context for individual generators to consume.
@@ -131,30 +152,56 @@ type Context struct {
 	// All the types, in case you want to look up something.
 	Universe types.Universe
 
+	// All the user-specified packages.  This is after recursive expansion.
+	Inputs []string
+
 	// The canonical ordering of the types (will be filtered by both the
 	// Package's and Generator's Filter methods).
 	Order []*types.Type
+
+	// A set of types this context can process. If this is empty or nil,
+	// the default "golang" filetype will be provided.
+	FileTypes map[string]FileType
+
+	// If true, Execute* calls will just verify that the existing output is
+	// correct. (You may set this after calling NewContext.)
+	Verify bool
+
+	// Allows generators to add packages at runtime.
+	builder *parser.Builder
 }
 
 // NewContext generates a context from the given builder, naming systems, and
 // the naming system you wish to construct the canonical ordering from.
 func NewContext(b *parser.Builder, nameSystems namer.NameSystems, canonicalOrderName string) (*Context, error) {
-	u, err := b.FindTypes()
+	universe, err := b.FindTypes()
 	if err != nil {
 		return nil, err
 	}
 
 	c := &Context{
 		Namers:   namer.NameSystems{},
-		Universe: u,
+		Universe: universe,
+		Inputs:   b.FindPackages(),
+		FileTypes: map[string]FileType{
+			GolangFileType: NewGolangFile(),
+		},
+		builder: b,
 	}
 
 	for name, systemNamer := range nameSystems {
 		c.Namers[name] = systemNamer
 		if name == canonicalOrderName {
-			orderer := namer.Orderer{systemNamer}
-			c.Order = orderer.Order(u)
+			orderer := namer.Orderer{Namer: systemNamer}
+			c.Order = orderer.OrderUniverse(universe)
 		}
 	}
 	return c, nil
+}
+
+// AddDir adds a Go package to the context. The specified path must be a single
+// go package import path.  GOPATH, GOROOT, and the location of your go binary
+// (`which go`) will all be searched, in the normal Go fashion.
+func (ctxt *Context) AddDir(path string) error {
+	return ctxt.builder.AddDirTo(path, &ctxt.Universe)
 }

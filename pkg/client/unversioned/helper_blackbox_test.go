@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package unversioned_test
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -27,9 +27,11 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api/testapi"
-	unversionedapi "k8s.io/kubernetes/pkg/api/unversioned"
+	uapi "k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	"k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/fake"
+	"k8s.io/kubernetes/pkg/runtime"
 )
 
 func objBody(object interface{}) io.ReadCloser {
@@ -41,74 +43,102 @@ func objBody(object interface{}) io.ReadCloser {
 }
 
 func TestNegotiateVersion(t *testing.T) {
-	refusedErr := fmt.Errorf("connection refused")
 	tests := []struct {
-		name, version, expectedVersion string
-		serverVersions                 []string
-		clientVersions                 []string
-		config                         *unversioned.Config
-		expectErr                      func(err error) bool
-		sendErr                        error
+		name            string
+		version         *uapi.GroupVersion
+		expectedVersion *uapi.GroupVersion
+		serverVersions  []string
+		clientVersions  []uapi.GroupVersion
+		config          *restclient.Config
+		expectErr       func(err error) bool
+		sendErr         error
+		statusCode      int
 	}{
 		{
 			name:            "server supports client default",
-			version:         "version1",
-			config:          &unversioned.Config{},
-			serverVersions:  []string{"version1", testapi.Default.Version()},
-			clientVersions:  []string{"version1", testapi.Default.Version()},
-			expectedVersion: "version1",
+			version:         &uapi.GroupVersion{Version: "version1"},
+			config:          &restclient.Config{},
+			serverVersions:  []string{"version1", testapi.Default.GroupVersion().String()},
+			clientVersions:  []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			expectedVersion: &uapi.GroupVersion{Version: "version1"},
+			statusCode:      http.StatusOK,
 		},
 		{
 			name:            "server falls back to client supported",
-			version:         testapi.Default.Version(),
-			config:          &unversioned.Config{},
+			version:         testapi.Default.GroupVersion(),
+			config:          &restclient.Config{},
 			serverVersions:  []string{"version1"},
-			clientVersions:  []string{"version1", testapi.Default.Version()},
-			expectedVersion: "version1",
+			clientVersions:  []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			expectedVersion: &uapi.GroupVersion{Version: "version1"},
+			statusCode:      http.StatusOK,
 		},
 		{
 			name:            "explicit version supported",
-			version:         "",
-			config:          &unversioned.Config{Version: testapi.Default.Version()},
-			serverVersions:  []string{"version1", testapi.Default.Version()},
-			clientVersions:  []string{"version1", testapi.Default.Version()},
-			expectedVersion: testapi.Default.Version(),
+			config:          &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}},
+			serverVersions:  []string{"/version1", testapi.Default.GroupVersion().String()},
+			clientVersions:  []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			expectedVersion: testapi.Default.GroupVersion(),
+			statusCode:      http.StatusOK,
 		},
 		{
 			name:           "explicit version not supported",
-			version:        "",
-			config:         &unversioned.Config{Version: testapi.Default.Version()},
+			config:         &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}},
 			serverVersions: []string{"version1"},
-			clientVersions: []string{"version1", testapi.Default.Version()},
+			clientVersions: []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
 			expectErr:      func(err error) bool { return strings.Contains(err.Error(), `server does not support API version "v1"`) },
+			statusCode:     http.StatusOK,
 		},
 		{
 			name:           "connection refused error",
-			config:         &unversioned.Config{Version: testapi.Default.Version()},
+			config:         &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}},
 			serverVersions: []string{"version1"},
-			clientVersions: []string{"version1", testapi.Default.Version()},
-			sendErr:        refusedErr,
-			expectErr:      func(err error) bool { return err == refusedErr },
+			clientVersions: []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			sendErr:        errors.New("connection refused"),
+			expectErr:      func(err error) bool { return strings.Contains(err.Error(), "connection refused") },
+			statusCode:     http.StatusOK,
+		},
+		{
+			name:            "discovery fails due to 403 Forbidden errors and thus serverVersions is empty, use default GroupVersion",
+			config:          &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}},
+			clientVersions:  []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			expectedVersion: testapi.Default.GroupVersion(),
+			statusCode:      http.StatusForbidden,
+		},
+		{
+			name:            "discovery fails due to 404 Not Found errors and thus serverVersions is empty, use requested GroupVersion",
+			version:         &uapi.GroupVersion{Version: "version1"},
+			config:          &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}},
+			clientVersions:  []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			expectedVersion: &uapi.GroupVersion{Version: "version1"},
+			statusCode:      http.StatusNotFound,
+		},
+		{
+			name:           "discovery fails due to 403 Forbidden errors and thus serverVersions is empty, no fallback GroupVersion",
+			config:         &restclient.Config{},
+			clientVersions: []uapi.GroupVersion{{Version: "version1"}, *testapi.Default.GroupVersion()},
+			expectErr:      func(err error) bool { return strings.Contains(err.Error(), "failed to negotiate an api version;") },
+			statusCode:     http.StatusForbidden,
 		},
 	}
-	codec := testapi.Default.Codec()
 
 	for _, test := range tests {
 		fakeClient := &fake.RESTClient{
-			Codec: codec,
+			NegotiatedSerializer: testapi.Default.NegotiatedSerializer(),
 			Resp: &http.Response{
-				StatusCode: 200,
-				Body:       objBody(&unversionedapi.APIVersions{Versions: test.serverVersions}),
+				StatusCode: test.statusCode,
+				Body:       objBody(&uapi.APIVersions{Versions: test.serverVersions}),
 			},
-			Client: fake.HTTPClientFunc(func(req *http.Request) (*http.Response, error) {
+			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				if test.sendErr != nil {
 					return nil, test.sendErr
 				}
-				return &http.Response{StatusCode: 200, Body: objBody(&unversionedapi.APIVersions{Versions: test.serverVersions})}, nil
+				header := http.Header{}
+				header.Set("Content-Type", runtime.ContentTypeJSON)
+				return &http.Response{StatusCode: test.statusCode, Header: header, Body: objBody(&uapi.APIVersions{Versions: test.serverVersions})}, nil
 			}),
 		}
 		c := unversioned.NewOrDie(test.config)
-		c.Client = fakeClient.Client
+		c.DiscoveryClient.Client = fakeClient.Client
 		response, err := unversioned.NegotiateVersion(c, test.config, test.version, test.clientVersions)
 		if err == nil && test.expectErr != nil {
 			t.Errorf("expected error, got nil for [%s].", test.name)
@@ -119,8 +149,8 @@ func TestNegotiateVersion(t *testing.T) {
 			}
 			continue
 		}
-		if response != test.expectedVersion {
-			t.Errorf("expected version %s, got %s.", test.expectedVersion, response)
+		if *response != *test.expectedVersion {
+			t.Errorf("%s: expected version %s, got %s.", test.name, test.expectedVersion, response)
 		}
 	}
 }

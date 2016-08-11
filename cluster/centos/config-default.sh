@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Kubernetes Authors All rights reserved.
+# Copyright 2015 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,13 +22,13 @@ export MASTER_IP=${MASTER#*@}
 # Define all your minion nodes,
 # And separated with blank space like <user_1@ip_1> <user_2@ip_2> <user_3@ip_3>.
 # The user should have sudo privilege
-export MINIONS=${MINIONS:-"centos@172.10.0.12 centos@172.10.0.13"}
-# If it practically impossible to set an array as an environment variable
-# from a script, so assume variable is a string then convert it to an array
-export MINIONS_ARRAY=($MINIONS)
+export NODES=${NODES:-"centos@172.10.0.12 centos@172.10.0.13"}
 
 # Number of nodes in your cluster.
-export NUM_MINIONS=${NUM_MINIONS:-2}
+export NUM_NODES=${NUM_NODES:-2}
+
+# Should be removed when NUM_NODES is deprecated in validate-cluster.sh
+export NUM_NODES=${NUM_NODES}
 
 # By default, the cluster will use the etcd installed on master.
 export ETCD_SERVERS=${ETCD_SERVERS:-"http://$MASTER_IP:4001"}
@@ -41,7 +41,8 @@ export SERVICE_CLUSTER_IP_RANGE=${SERVICE_CLUSTER_IP_RANGE:-"192.168.3.0/24"}
 export FLANNEL_NET=${FLANNEL_NET:-"172.16.0.0/16"}
 
 # Admission Controllers to invoke prior to persisting objects in cluster
-export ADMISSION_CONTROL=NamespaceLifecycle,NamespaceExists,LimitRanger,ServiceAccount,ResourceQuota,SecurityContextDeny
+# If we included ResourceQuota, we should keep it at the end of the list to prevent incremeting quota usage prematurely.
+export ADMISSION_CONTROL=NamespaceLifecycle,NamespaceExists,LimitRanger,ServiceAccount,SecurityContextDeny,ResourceQuota
 
 # Extra options to set on the Docker command line.
 # This is useful for setting --insecure-registry for local registries.

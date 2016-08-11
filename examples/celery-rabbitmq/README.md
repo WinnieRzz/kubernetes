@@ -2,15 +2,15 @@
 
 <!-- BEGIN STRIP_FOR_RELEASE -->
 
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
+<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
      width="25" height="25">
 
 <h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/examples/celery-rabbitmq/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.3/examples/celery-rabbitmq/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -57,7 +58,7 @@ At the end of the example, we will have:
 
 ## Prerequisites
 
-You should already have turned up a Kubernetes cluster. To get the most of this example, ensure that Kubernetes will create more than one node (e.g. by setting your `NUM_MINIONS` environment variable to 2 or more).
+You should already have turned up a Kubernetes cluster. To get the most of this example, ensure that Kubernetes will create more than one node (e.g. by setting your `NUM_NODES` environment variable to 2 or more).
 
 
 ## Step 1: Start the RabbitMQ service
@@ -122,6 +123,13 @@ spec:
         resources:
           limits:
             cpu: 100m
+        livenessProbe:
+          httpGet:
+            # Path to probe; should be cheap, but representative of typical behavior
+            path: /
+            port: 5672
+          initialDelaySeconds: 30
+          timeoutSeconds: 1
 ```
 
 [Download example](rabbitmq-controller.yaml?raw=true)
@@ -268,9 +276,18 @@ spec:
       containers:
       - image: endocode/flower
         name: flower
+        ports:
+        - containerPort: 5555
         resources:
           limits:
             cpu: 100m
+        livenessProbe:
+          httpGet:
+            # Path to probe; should be cheap, but representative of typical behavior
+            path: /
+            port: 5555
+          initialDelaySeconds: 30
+          timeoutSeconds: 1
 ```
 
 [Download example](flower-controller.yaml?raw=true)

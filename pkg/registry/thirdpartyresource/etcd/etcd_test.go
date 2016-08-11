@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package etcd
 
 import (
+	"fmt"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -25,49 +26,59 @@ import (
 	_ "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/tools"
+	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
 )
 
-func newStorage(t *testing.T) (*REST, *tools.FakeEtcdClient) {
-	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "extensions")
-	return NewREST(etcdStorage), fakeClient
+func newStorage(t *testing.T) (*REST, *etcdtesting.EtcdTestServer) {
+	etcdStorage, server := registrytest.NewEtcdStorage(t, extensions.GroupName)
+	restOptions := generic.RESTOptions{Storage: etcdStorage, Decorator: generic.UndecoratedStorage, DeleteCollectionWorkers: 1}
+	return NewREST(restOptions), server
 }
 
 func validNewThirdPartyResource(name string) *extensions.ThirdPartyResource {
 	return &extensions.ThirdPartyResource{
 		ObjectMeta: api.ObjectMeta{
-			Name:      name,
-			Namespace: api.NamespaceDefault,
+			Name: name,
 		},
 		Versions: []extensions.APIVersion{
 			{
-				Name: "stable/v1",
+				Name: "v1",
 			},
 		},
 	}
 }
 
+func namer(i int) string {
+	return fmt.Sprintf("kind%d.example.com", i)
+}
+
 func TestCreate(t *testing.T) {
-	storage, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
-	rsrc := validNewThirdPartyResource("foo")
-	rsrc.ObjectMeta = api.ObjectMeta{}
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ClusterScope().Namer(namer).GeneratesName()
+	rsrc := validNewThirdPartyResource("kind.domain.tld")
 	test.TestCreate(
 		// valid
 		rsrc,
 		// invalid
 		&extensions.ThirdPartyResource{},
+		&extensions.ThirdPartyResource{ObjectMeta: api.ObjectMeta{Name: "kind"}, Versions: []extensions.APIVersion{{Name: "v1"}}},
+		&extensions.ThirdPartyResource{ObjectMeta: api.ObjectMeta{Name: "kind.tld"}, Versions: []extensions.APIVersion{{Name: "v1"}}},
+		&extensions.ThirdPartyResource{ObjectMeta: api.ObjectMeta{Name: "kind.domain.tld"}, Versions: []extensions.APIVersion{{Name: "v.1"}}},
+		&extensions.ThirdPartyResource{ObjectMeta: api.ObjectMeta{Name: "kind.domain.tld"}, Versions: []extensions.APIVersion{{Name: "stable/v1"}}},
 	)
 }
 
 func TestUpdate(t *testing.T) {
-	storage, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ClusterScope().Namer(namer)
 	test.TestUpdate(
 		// valid
-		validNewThirdPartyResource("foo"),
+		validNewThirdPartyResource("kind.domain.tld"),
 		// updateFunc
 		func(obj runtime.Object) runtime.Object {
 			object := obj.(*extensions.ThirdPartyResource)
@@ -78,28 +89,32 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	storage, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
-	test.TestDelete(validNewThirdPartyResource("foo"))
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ClusterScope().Namer(namer)
+	test.TestDelete(validNewThirdPartyResource("kind.domain.tld"))
 }
 
 func TestGet(t *testing.T) {
-	storage, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
-	test.TestGet(validNewThirdPartyResource("foo"))
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ClusterScope().Namer(namer)
+	test.TestGet(validNewThirdPartyResource("kind.domain.tld"))
 }
 
 func TestList(t *testing.T) {
-	storage, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
-	test.TestList(validNewThirdPartyResource("foo"))
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ClusterScope().Namer(namer)
+	test.TestList(validNewThirdPartyResource("kind.domain.tld"))
 }
 
 func TestWatch(t *testing.T) {
-	storage, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ClusterScope().Namer(namer)
 	test.TestWatch(
-		validNewThirdPartyResource("foo"),
+		validNewThirdPartyResource("kind.domain.tld"),
 		// matching labels
 		[]labels.Set{},
 		// not matching labels

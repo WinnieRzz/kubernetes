@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,15 +24,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
-	"k8s.io/kubernetes/pkg/kubelet"
+	kubeletserver "k8s.io/kubernetes/pkg/kubelet/server"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/httpstream"
 )
@@ -87,7 +88,7 @@ func TestParsePortsAndNew(t *testing.T) {
 
 		dialer := &fakeDialer{}
 		expectedStopChan := make(chan struct{})
-		pf, err := New(dialer, test.input, expectedStopChan)
+		pf, err := New(dialer, test.input, expectedStopChan, os.Stdout, os.Stderr)
 		haveError = err != nil
 		if e, a := test.expectNewError, haveError; e != a {
 			t.Fatalf("%d: New: error expected=%t, got %t: %s", i, e, a, err)
@@ -204,47 +205,39 @@ func TestGetListener(t *testing.T) {
 }
 
 // fakePortForwarder simulates port forwarding for testing. It implements
-// kubelet.PortForwarder.
+// kubeletserver.PortForwarder.
 type fakePortForwarder struct {
 	lock sync.Mutex
+	// stores data expected from the stream per port
+	expected map[uint16]string
 	// stores data received from the stream per port
 	received map[uint16]string
 	// data to be sent to the stream per port
 	send map[uint16]string
 }
 
-var _ kubelet.PortForwarder = &fakePortForwarder{}
+var _ kubeletserver.PortForwarder = &fakePortForwarder{}
 
 func (pf *fakePortForwarder) PortForward(name string, uid types.UID, port uint16, stream io.ReadWriteCloser) error {
 	defer stream.Close()
 
-	var wg sync.WaitGroup
+	// read from the client
+	received := make([]byte, len(pf.expected[port]))
+	n, err := stream.Read(received)
+	if err != nil {
+		return fmt.Errorf("error reading from client for port %d: %v", port, err)
+	}
+	if n != len(pf.expected[port]) {
+		return fmt.Errorf("unexpected length read from client for port %d: got %d, expected %d. data=%q", port, n, len(pf.expected[port]), string(received))
+	}
 
-	// client -> server
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	// store the received content
+	pf.lock.Lock()
+	pf.received[port] = string(received)
+	pf.lock.Unlock()
 
-		// copy from stream into a buffer
-		received := new(bytes.Buffer)
-		io.Copy(received, stream)
-
-		// store the received content
-		pf.lock.Lock()
-		pf.received[port] = received.String()
-		pf.lock.Unlock()
-	}()
-
-	// server -> client
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		// send the hardcoded data to the stream
-		io.Copy(stream, strings.NewReader(pf.send[port]))
-	}()
-
-	wg.Wait()
+	// send the hardcoded data to the client
+	io.Copy(stream, strings.NewReader(pf.send[port]))
 
 	return nil
 }
@@ -254,10 +247,11 @@ func (pf *fakePortForwarder) PortForward(name string, uid types.UID, port uint16
 func fakePortForwardServer(t *testing.T, testName string, serverSends, expectedFromClient map[uint16]string) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		pf := &fakePortForwarder{
+			expected: expectedFromClient,
 			received: make(map[uint16]string),
 			send:     serverSends,
 		}
-		kubelet.ServePortForward(w, req, pf, "pod", "uid", 0, 10*time.Second)
+		kubeletserver.ServePortForward(w, req, pf, "pod", "uid", 0, 10*time.Second)
 
 		for port, expected := range expectedFromClient {
 			actual, ok := pf.received[port]
@@ -305,14 +299,14 @@ func TestForwardPorts(t *testing.T) {
 		server := httptest.NewServer(fakePortForwardServer(t, testName, test.serverSends, test.clientSends))
 
 		url, _ := url.Parse(server.URL)
-		exec, err := remotecommand.NewExecutor(&client.Config{}, "POST", url)
+		exec, err := remotecommand.NewExecutor(&restclient.Config{}, "POST", url)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		stopChan := make(chan struct{}, 1)
 
-		pf, err := New(exec, test.ports, stopChan)
+		pf, err := New(exec, test.ports, stopChan, os.Stdout, os.Stderr)
 		if err != nil {
 			t.Fatalf("%s: unexpected error calling New: %v", testName, err)
 		}
@@ -374,7 +368,7 @@ func TestForwardPortsReturnsErrorWhenAllBindsFailed(t *testing.T) {
 	defer server.Close()
 
 	url, _ := url.Parse(server.URL)
-	exec, err := remotecommand.NewExecutor(&client.Config{}, "POST", url)
+	exec, err := remotecommand.NewExecutor(&restclient.Config{}, "POST", url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +376,7 @@ func TestForwardPortsReturnsErrorWhenAllBindsFailed(t *testing.T) {
 	stopChan1 := make(chan struct{}, 1)
 	defer close(stopChan1)
 
-	pf1, err := New(exec, []string{"5555"}, stopChan1)
+	pf1, err := New(exec, []string{"5555"}, stopChan1, os.Stdout, os.Stderr)
 	if err != nil {
 		t.Fatalf("error creating pf1: %v", err)
 	}
@@ -390,7 +384,7 @@ func TestForwardPortsReturnsErrorWhenAllBindsFailed(t *testing.T) {
 	<-pf1.Ready
 
 	stopChan2 := make(chan struct{}, 1)
-	pf2, err := New(exec, []string{"5555"}, stopChan2)
+	pf2, err := New(exec, []string{"5555"}, stopChan2, os.Stdout, os.Stderr)
 	if err != nil {
 		t.Fatalf("error creating pf2: %v", err)
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,9 +21,11 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
+	"k8s.io/kubernetes/pkg/runtime"
 )
 
 func TestResourceVersioner(t *testing.T) {
@@ -48,9 +50,9 @@ func TestResourceVersioner(t *testing.T) {
 
 func TestCodec(t *testing.T) {
 	daemonSet := extensions.DaemonSet{}
-	// We do want to use package latest rather than testapi here, because we
-	// want to test if the package install and package latest work as expected.
-	data, err := latest.GroupOrDie("extensions").Codec.Encode(&daemonSet)
+	// We do want to use package registered rather than testapi here, because we
+	// want to test if the package install and package registered work as expected.
+	data, err := runtime.Encode(api.Codecs.LegacyCodec(registered.GroupOrDie(extensions.GroupName).GroupVersion), &daemonSet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,50 +60,53 @@ func TestCodec(t *testing.T) {
 	if err := json.Unmarshal(data, &other); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if other.APIVersion != latest.GroupOrDie("extensions").GroupVersion || other.Kind != "DaemonSet" {
+	if other.APIVersion != registered.GroupOrDie(extensions.GroupName).GroupVersion.String() || other.Kind != "DaemonSet" {
 		t.Errorf("unexpected unmarshalled object %#v", other)
 	}
 }
 
 func TestInterfacesFor(t *testing.T) {
-	if _, err := latest.GroupOrDie("extensions").InterfacesFor(""); err == nil {
+	if _, err := registered.GroupOrDie(extensions.GroupName).InterfacesFor(extensions.SchemeGroupVersion); err == nil {
 		t.Fatalf("unexpected non-error: %v", err)
 	}
-	for i, groupVersion := range append([]string{latest.GroupOrDie("extensions").GroupVersion}, latest.GroupOrDie("extensions").GroupVersions...) {
-		if vi, err := latest.GroupOrDie("extensions").InterfacesFor(groupVersion); err != nil || vi == nil {
+	for i, version := range registered.GroupOrDie(extensions.GroupName).GroupVersions {
+		if vi, err := registered.GroupOrDie(extensions.GroupName).InterfacesFor(version); err != nil || vi == nil {
 			t.Fatalf("%d: unexpected result: %v", i, err)
 		}
 	}
 }
 
 func TestRESTMapper(t *testing.T) {
-	if v, k, err := latest.GroupOrDie("extensions").RESTMapper.VersionAndKindForResource("horizontalpodautoscalers"); err != nil || v != "extensions/v1beta1" || k != "HorizontalPodAutoscaler" {
-		t.Errorf("unexpected version mapping: %s %s %v", v, k, err)
+	gv := v1beta1.SchemeGroupVersion
+	daemonSetGVK := gv.WithKind("DaemonSet")
+
+	if gvk, err := registered.GroupOrDie(extensions.GroupName).RESTMapper.KindFor(gv.WithResource("daemonsets")); err != nil || gvk != daemonSetGVK {
+		t.Errorf("unexpected version mapping: %v %v", gvk, err)
 	}
 
-	if m, err := latest.GroupOrDie("extensions").RESTMapper.RESTMapping("DaemonSet", ""); err != nil || m.APIVersion != "extensions/v1beta1" || m.Resource != "daemonsets" {
+	if m, err := registered.GroupOrDie(extensions.GroupName).RESTMapper.RESTMapping(daemonSetGVK.GroupKind(), ""); err != nil || m.GroupVersionKind != daemonSetGVK || m.Resource != "daemonsets" {
 		t.Errorf("unexpected version mapping: %#v %v", m, err)
 	}
 
-	for _, groupVersion := range latest.GroupOrDie("extensions").GroupVersions {
-		mapping, err := latest.GroupOrDie("extensions").RESTMapper.RESTMapping("HorizontalPodAutoscaler", groupVersion)
+	for _, version := range registered.GroupOrDie(extensions.GroupName).GroupVersions {
+		mapping, err := registered.GroupOrDie(extensions.GroupName).RESTMapper.RESTMapping(daemonSetGVK.GroupKind(), version.Version)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
 
-		if mapping.Resource != "horizontalpodautoscalers" {
+		if mapping.Resource != "daemonsets" {
 			t.Errorf("incorrect resource name: %#v", mapping)
 		}
-		if mapping.APIVersion != groupVersion {
+		if mapping.GroupVersionKind.GroupVersion() != version {
 			t.Errorf("incorrect groupVersion: %v", mapping)
 		}
 
-		interfaces, _ := latest.GroupOrDie("extensions").InterfacesFor(groupVersion)
-		if mapping.Codec != interfaces.Codec {
-			t.Errorf("unexpected codec: %#v, expected: %#v", mapping, interfaces)
+		interfaces, _ := registered.GroupOrDie(extensions.GroupName).InterfacesFor(version)
+		if mapping.ObjectConvertor != interfaces.ObjectConvertor {
+			t.Errorf("unexpected: %#v, expected: %#v", mapping, interfaces)
 		}
 
-		rc := &extensions.HorizontalPodAutoscaler{ObjectMeta: api.ObjectMeta{Name: "foo"}}
+		rc := &extensions.DaemonSet{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 		name, err := mapping.MetadataAccessor.Name(rc)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)

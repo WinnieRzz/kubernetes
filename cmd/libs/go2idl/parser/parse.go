@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,17 +18,19 @@ package parser
 
 import (
 	"fmt"
+	"go/ast"
+	"go/build"
+	"go/parser"
+	"go/token"
+	tc "go/types"
 	"io/ioutil"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/golang/glog"
 	"k8s.io/kubernetes/cmd/libs/go2idl/types"
-	"k8s.io/kubernetes/third_party/golang/go/ast"
-	"k8s.io/kubernetes/third_party/golang/go/build"
-	"k8s.io/kubernetes/third_party/golang/go/parser"
-	"k8s.io/kubernetes/third_party/golang/go/token"
-	tc "k8s.io/kubernetes/third_party/golang/go/types"
 )
 
 // Builder lets you add all the go files in all the packages that you care
@@ -39,9 +41,11 @@ type Builder struct {
 
 	fset *token.FileSet
 	// map of package id to list of parsed files
-	parsed map[string][]*ast.File
+	parsed map[string][]parsedFile
+	// map of package id to absolute path (to prevent overlap)
+	absPaths map[string]string
 
-	// Set by makePackages, used by importer() and friends.
+	// Set by makePackage(), used by importer() and friends.
 	pkgs map[string]*tc.Package
 
 	// Map of package path to whether the user requested it or it was from
@@ -53,6 +57,12 @@ type Builder struct {
 
 	// map of package to list of packages it imports.
 	importGraph map[string]map[string]struct{}
+}
+
+// parsedFile is for tracking files with name
+type parsedFile struct {
+	name string
+	file *ast.File
 }
 
 // key type for finding comments.
@@ -69,26 +79,45 @@ func New() *Builder {
 			// The returned string will have some/path/bin/go, so remove the last two elements.
 			c.GOROOT = filepath.Dir(filepath.Dir(strings.Trim(string(p), "\n")))
 		} else {
-			fmt.Printf("Warning: $GOROOT not set, and unable to run `which go` to find it: %v\n", err)
+			glog.Warningf("Warning: $GOROOT not set, and unable to run `which go` to find it: %v\n", err)
 		}
 	}
+	// Force this to off, since we don't properly parse CGo.  All symbols must
+	// have non-CGo equivalents.
+	c.CgoEnabled = false
 	return &Builder{
 		context:               &c,
 		buildInfo:             map[string]*build.Package{},
 		fset:                  token.NewFileSet(),
-		parsed:                map[string][]*ast.File{},
+		parsed:                map[string][]parsedFile{},
+		absPaths:              map[string]string{},
 		userRequested:         map[string]bool{},
 		endLineToCommentGroup: map[fileLine]*ast.CommentGroup{},
 		importGraph:           map[string]map[string]struct{}{},
 	}
 }
 
+// AddBuildTags adds the specified build tags to the parse context.
+func (b *Builder) AddBuildTags(tags ...string) {
+	b.context.BuildTags = append(b.context.BuildTags, tags...)
+}
+
 // Get package information from the go/build package. Automatically excludes
 // e.g. test files and files for other platforms-- there is quite a bit of
 // logic of that nature in the build package.
 func (b *Builder) buildPackage(pkgPath string) (*build.Package, error) {
+	// This is a bit of a hack.  The srcDir argument to Import() should
+	// properly be the dir of the file which depends on the package to be
+	// imported, so that vendoring can work properly.  We assume that there is
+	// only one level of vendoring, and that the CWD is inside the GOPATH, so
+	// this should be safe.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get current directory: %v", err)
+	}
+
 	// First, find it, so we know what path to use.
-	pkg, err := b.context.Import(pkgPath, ".", build.FindOnly)
+	pkg, err := b.context.Import(pkgPath, cwd, build.FindOnly)
 	if err != nil {
 		return nil, fmt.Errorf("unable to *find* %q: %v", pkgPath, err)
 	}
@@ -98,9 +127,11 @@ func (b *Builder) buildPackage(pkgPath string) (*build.Package, error) {
 	if pkg, ok := b.buildInfo[pkgPath]; ok {
 		return pkg, nil
 	}
-	pkg, err = b.context.Import(pkgPath, ".", build.ImportComment)
+	pkg, err = b.context.Import(pkgPath, cwd, build.ImportComment)
 	if err != nil {
-		return nil, fmt.Errorf("unable to import %q: %v", pkgPath, err)
+		if _, ok := err.(*build.NoGoError); !ok {
+			return nil, fmt.Errorf("unable to import %q: %v", pkgPath, err)
+		}
 	}
 	b.buildInfo[pkgPath] = pkg
 
@@ -113,21 +144,31 @@ func (b *Builder) buildPackage(pkgPath string) (*build.Package, error) {
 	return pkg, nil
 }
 
-// AddFile adds a file to the set. The name must be of the form canonical/pkg/path/file.go.
-func (b *Builder) AddFile(name string, src []byte) error {
-	return b.addFile(name, src, true)
+// AddFile adds a file to the set. The pkg must be of the form
+// "canonical/pkg/path" and the path must be the absolute path to the file.
+func (b *Builder) AddFile(pkg string, path string, src []byte) error {
+	return b.addFile(pkg, path, src, true)
 }
 
-// addFile adds a file to the set. The name must be of the form
-// canonical/pkg/path/file.go. A flag indicates whether this file was
-// user-requested or just from following the import graph.
-func (b *Builder) addFile(name string, src []byte, userRequested bool) error {
-	p, err := parser.ParseFile(b.fset, name, src, parser.DeclarationErrors|parser.ParseComments)
+// addFile adds a file to the set. The pkg must be of the form
+// "canonical/pkg/path" and the path must be the absolute path to the file. A
+// flag indicates whether this file was user-requested or just from following
+// the import graph.
+func (b *Builder) addFile(pkg string, path string, src []byte, userRequested bool) error {
+	p, err := parser.ParseFile(b.fset, path, src, parser.DeclarationErrors|parser.ParseComments)
 	if err != nil {
 		return err
 	}
-	pkg := filepath.Dir(name)
-	b.parsed[pkg] = append(b.parsed[pkg], p)
+	dirPath := filepath.Dir(path)
+	if prev, found := b.absPaths[pkg]; found {
+		if dirPath != prev {
+			return fmt.Errorf("package %q (%s) previously resolved to %s", pkg, dirPath, prev)
+		}
+	} else {
+		b.absPaths[pkg] = dirPath
+	}
+
+	b.parsed[pkg] = append(b.parsed[pkg], parsedFile{path, p})
 	b.userRequested[pkg] = userRequested
 	for _, c := range p.Comments {
 		position := b.fset.Position(c.End())
@@ -153,6 +194,65 @@ func (b *Builder) AddDir(dir string) error {
 	return b.addDir(dir, true)
 }
 
+// AddDirRecursive is just like AddDir, but it also recursively adds
+// subdirectories; it returns an error only if the path couldn't be resolved;
+// any directories recursed into without go source are ignored.
+func (b *Builder) AddDirRecursive(dir string) error {
+	// This is a bit of a hack.  The srcDir argument to Import() should
+	// properly be the dir of the file which depends on the package to be
+	// imported, so that vendoring can work properly.  We assume that there is
+	// only one level of vendoring, and that the CWD is inside the GOPATH, so
+	// this should be safe.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("unable to get current directory: %v", err)
+	}
+
+	// First, find it, so we know what path to use.
+	pkg, err := b.context.Import(dir, cwd, build.FindOnly)
+	if err != nil {
+		return fmt.Errorf("unable to *find* %q: %v", dir, err)
+	}
+
+	if err := b.addDir(dir, true); err != nil {
+		glog.Warningf("Ignoring directory %v: %v", dir, err)
+	}
+
+	prefix := strings.TrimSuffix(pkg.Dir, strings.TrimSuffix(dir, "/"))
+	filepath.Walk(pkg.Dir, func(path string, info os.FileInfo, err error) error {
+		if info != nil && info.IsDir() {
+			trimmed := strings.TrimPrefix(path, prefix)
+			if trimmed != "" {
+				if err := b.addDir(trimmed, true); err != nil {
+					glog.Warningf("Ignoring child directory %v: %v", trimmed, err)
+				}
+			}
+		}
+		return nil
+	})
+	return nil
+}
+
+// AddDirTo adds an entire directory to a given Universe. Unlike AddDir, this
+// processes the package immediately, which makes it safe to use from within a
+// generator (rather than just at init time. 'dir' must be a single go package.
+// GOPATH, GOROOT, and the location of your go binary (`which go`) will all be
+// searched if dir doesn't literally resolve.
+func (b *Builder) AddDirTo(dir string, u *types.Universe) error {
+	if _, found := b.parsed[dir]; !found {
+		// We want all types from this package, as if they were directly added
+		// by the user.  They WERE added by the user, in effect.
+		if err := b.addDir(dir, true); err != nil {
+			return err
+		}
+	} else {
+		// We already had this package, but we want it to be considered as if
+		// the user addid it directly.
+		b.userRequested[dir] = true
+	}
+	return b.findTypesIn(dir, u)
+}
+
 // The implementation of AddDir. A flag indicates whether this directory was
 // user-requested or just from following the import graph.
 func (b *Builder) addDir(dir string, userRequested bool) error {
@@ -160,10 +260,11 @@ func (b *Builder) addDir(dir string, userRequested bool) error {
 	if err != nil {
 		return err
 	}
-	dir = pkg.Dir
 	// Check in case this package was added (maybe dir was not canonical)
-	if _, alreadyAdded := b.parsed[dir]; alreadyAdded {
-		return nil
+	if wasRequested, wasAdded := b.userRequested[dir]; wasAdded {
+		if !userRequested || userRequested == wasRequested {
+			return nil
+		}
 	}
 
 	for _, n := range pkg.GoFiles {
@@ -171,14 +272,13 @@ func (b *Builder) addDir(dir string, userRequested bool) error {
 			continue
 		}
 		absPath := filepath.Join(pkg.Dir, n)
-		pkgPath := filepath.Join(pkg.ImportPath, n)
 		data, err := ioutil.ReadFile(absPath)
 		if err != nil {
 			return fmt.Errorf("while loading %q: %v", absPath, err)
 		}
-		err = b.addFile(pkgPath, data, userRequested)
+		err = b.addFile(dir, absPath, data, userRequested)
 		if err != nil {
-			return fmt.Errorf("while parsing %q: %v", pkgPath, err)
+			return fmt.Errorf("while parsing %q: %v", absPath, err)
 		}
 	}
 	return nil
@@ -197,7 +297,6 @@ func (b *Builder) importer(imports map[string]*tc.Package, path string) (*tc.Pac
 		// Ignore errors in paths that we're importing solely because
 		// they're referenced by other packages.
 		ignoreError = true
-		// fmt.Printf("trying to import %q\n", path)
 		if err := b.addDir(path, false); err != nil {
 			return nil, err
 		}
@@ -205,7 +304,7 @@ func (b *Builder) importer(imports map[string]*tc.Package, path string) (*tc.Pac
 	pkg, err := b.typeCheckPackage(path)
 	if err != nil {
 		if ignoreError && pkg != nil {
-			fmt.Printf("type checking encountered some errors in %q, but ignoring.\n", path)
+			glog.V(2).Infof("type checking encountered some errors in %q, but ignoring.\n", path)
 		} else {
 			return nil, err
 		}
@@ -236,9 +335,13 @@ func (b *Builder) typeCheckPackage(id string) (*tc.Package, error) {
 		// already processing this package.
 		return nil, fmt.Errorf("circular dependency for %q", id)
 	}
-	files, ok := b.parsed[id]
+	parsedFiles, ok := b.parsed[id]
 	if !ok {
 		return nil, fmt.Errorf("No files for pkg %q: %#v", id, b.parsed)
+	}
+	files := make([]*ast.File, len(parsedFiles))
+	for i := range parsedFiles {
+		files[i] = parsedFiles[i].file
 	}
 	b.pkgs[id] = nil
 	c := tc.Config{
@@ -247,7 +350,7 @@ func (b *Builder) typeCheckPackage(id string) (*tc.Package, error) {
 		// method. So there can't be cycles in the import graph.
 		Importer: importAdapter{b},
 		Error: func(err error) {
-			fmt.Printf("type checker error: %v\n", err)
+			glog.V(2).Infof("type checker error: %v\n", err)
 		},
 	}
 	pkg, err := c.Check(id, b.fset, files, nil)
@@ -255,71 +358,156 @@ func (b *Builder) typeCheckPackage(id string) (*tc.Package, error) {
 	return pkg, err
 }
 
-func (b *Builder) makePackages() error {
-	b.pkgs = map[string]*tc.Package{}
+func (b *Builder) makeAllPackages() error {
+	// Take a snapshot to iterate, since this will recursively mutate b.parsed.
+	keys := []string{}
 	for id := range b.parsed {
-		// We have to check here even though we made a new one above,
-		// because typeCheckPackage follows the import graph, which may
-		// cause a package to be filled before we get to it in this
-		// loop.
-		if _, done := b.pkgs[id]; done {
-			continue
-		}
-		if _, err := b.typeCheckPackage(id); err != nil {
+		keys = append(keys, id)
+	}
+	for _, id := range keys {
+		if _, err := b.makePackage(id); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (b *Builder) makePackage(id string) (*tc.Package, error) {
+	if b.pkgs == nil {
+		b.pkgs = map[string]*tc.Package{}
+	}
+
+	// We have to check here even though we made a new one above,
+	// because typeCheckPackage follows the import graph, which may
+	// cause a package to be filled before we get to it in this
+	// loop.
+	if pkg, done := b.pkgs[id]; done {
+		return pkg, nil
+	}
+	return b.typeCheckPackage(id)
+}
+
+// FindPackages fetches a list of the user-imported packages.
+func (b *Builder) FindPackages() []string {
+	result := []string{}
+	for pkgPath := range b.pkgs {
+		if b.userRequested[pkgPath] {
+			// Since walkType is recursive, all types that are in packages that
+			// were directly mentioned will be included.  We don't need to
+			// include all types in all transitive packages, though.
+			result = append(result, pkgPath)
+		}
+	}
+	return result
+}
+
 // FindTypes finalizes the package imports, and searches through all the
 // packages for types.
 func (b *Builder) FindTypes() (types.Universe, error) {
-	if err := b.makePackages(); err != nil {
+	if err := b.makeAllPackages(); err != nil {
 		return nil, err
 	}
 
 	u := types.Universe{}
 
-	for pkgName, pkg := range b.pkgs {
-		if !b.userRequested[pkgName] {
-			// Since walkType is recursive, all types that the
-			// packages they asked for depend on will be included.
-			// But we don't need to include all types in all
-			// *packages* they depend on.
-			continue
-		}
-		s := pkg.Scope()
-		for _, n := range s.Names() {
-			obj := s.Lookup(n)
-			tn, ok := obj.(*tc.TypeName)
-			if !ok {
-				continue
-			}
-			t := b.walkType(u, nil, tn.Type())
-			t.CommentLines = b.priorCommentLines(obj.Pos())
-		}
-		for p := range b.importGraph[pkgName] {
-			u.AddImports(pkgName, p)
+	for pkgPath := range b.parsed {
+		if err := b.findTypesIn(pkgPath, &u); err != nil {
+			return nil, err
 		}
 	}
 	return u, nil
 }
 
-// if there's a comment on the line before pos, return its text, otherwise "".
-func (b *Builder) priorCommentLines(pos token.Pos) string {
-	position := b.fset.Position(pos)
-	key := fileLine{position.Filename, position.Line - 1}
-	if c, ok := b.endLineToCommentGroup[key]; ok {
-		return c.Text()
+// findTypesIn finalizes the package import and searches through the package
+// for types.
+func (b *Builder) findTypesIn(pkgPath string, u *types.Universe) error {
+	pkg, err := b.makePackage(pkgPath)
+	if err != nil {
+		return err
 	}
-	return ""
+	if !b.userRequested[pkgPath] {
+		// Since walkType is recursive, all types that the
+		// packages they asked for depend on will be included.
+		// But we don't need to include all types in all
+		// *packages* they depend on.
+		return nil
+	}
+
+	for _, f := range b.parsed[pkgPath] {
+		if strings.HasSuffix(f.name, "/doc.go") {
+			tp := u.Package(pkgPath)
+			for i := range f.file.Comments {
+				tp.Comments = append(tp.Comments, splitLines(f.file.Comments[i].Text())...)
+			}
+			if f.file.Doc != nil {
+				tp.DocComments = splitLines(f.file.Doc.Text())
+			}
+		}
+	}
+
+	s := pkg.Scope()
+	for _, n := range s.Names() {
+		obj := s.Lookup(n)
+		tn, ok := obj.(*tc.TypeName)
+		if ok {
+			t := b.walkType(*u, nil, tn.Type())
+			c1 := b.priorCommentLines(obj.Pos(), 1)
+			t.CommentLines = splitLines(c1.Text())
+			if c1 == nil {
+				t.SecondClosestCommentLines = splitLines(b.priorCommentLines(obj.Pos(), 2).Text())
+			} else {
+				t.SecondClosestCommentLines = splitLines(b.priorCommentLines(c1.List[0].Slash, 2).Text())
+			}
+		}
+		tf, ok := obj.(*tc.Func)
+		// We only care about functions, not concrete/abstract methods.
+		if ok && tf.Type() != nil && tf.Type().(*tc.Signature).Recv() == nil {
+			b.addFunction(*u, nil, tf)
+		}
+		tv, ok := obj.(*tc.Var)
+		if ok && !tv.IsField() {
+			b.addVariable(*u, nil, tv)
+		}
+	}
+	for p := range b.importGraph[pkgPath] {
+		u.AddImports(pkgPath, p)
+	}
+	u.Package(pkgPath).Name = pkg.Name()
+	return nil
+}
+
+// if there's a comment on the line `lines` before pos, return its text, otherwise "".
+func (b *Builder) priorCommentLines(pos token.Pos, lines int) *ast.CommentGroup {
+	position := b.fset.Position(pos)
+	key := fileLine{position.Filename, position.Line - lines}
+	return b.endLineToCommentGroup[key]
+}
+
+func splitLines(str string) []string {
+	return strings.Split(strings.TrimRight(str, "\n"), "\n")
+}
+
+func tcFuncNameToName(in string) types.Name {
+	name := strings.TrimLeft(in, "func ")
+	nameParts := strings.Split(name, "(")
+	return tcNameToName(nameParts[0])
+}
+
+func tcVarNameToName(in string) types.Name {
+	nameParts := strings.Split(in, " ")
+	// nameParts[0] is "var".
+	// nameParts[2:] is the type of the variable, we ignore it for now.
+	return tcNameToName(nameParts[1])
 }
 
 func tcNameToName(in string) types.Name {
 	// Detect anonymous type names. (These may have '.' characters because
 	// embedded types may have packages, so we detect them specially.)
 	if strings.HasPrefix(in, "struct{") ||
+		strings.HasPrefix(in, "<-chan") ||
+		strings.HasPrefix(in, "chan<-") ||
+		strings.HasPrefix(in, "chan ") ||
+		strings.HasPrefix(in, "func(") ||
 		strings.HasPrefix(in, "*") ||
 		strings.HasPrefix(in, "map[") ||
 		strings.HasPrefix(in, "[") {
@@ -363,7 +551,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 
 	switch t := in.(type) {
 	case *tc.Struct:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -375,13 +563,13 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 				Embedded:     f.Anonymous(),
 				Tags:         t.Tag(i),
 				Type:         b.walkType(u, nil, f.Type()),
-				CommentLines: b.priorCommentLines(f.Pos()),
+				CommentLines: splitLines(b.priorCommentLines(f.Pos(), 1).Text()),
 			}
 			out.Members = append(out.Members, m)
 		}
 		return out
 	case *tc.Map:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -390,7 +578,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		out.Key = b.walkType(u, nil, t.Key())
 		return out
 	case *tc.Pointer:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -398,7 +586,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		out.Elem = b.walkType(u, nil, t.Elem())
 		return out
 	case *tc.Slice:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -406,7 +594,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		out.Elem = b.walkType(u, nil, t.Elem())
 		return out
 	case *tc.Array:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -416,7 +604,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		// cannot be properly written.
 		return out
 	case *tc.Chan:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -426,7 +614,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		// cannot be properly written.
 		return out
 	case *tc.Basic:
-		out := u.Get(types.Name{
+		out := u.Type(types.Name{
 			Package: "",
 			Name:    t.Name(),
 		})
@@ -436,7 +624,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		out.Kind = types.Unsupported
 		return out
 	case *tc.Signature:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
@@ -444,21 +632,24 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 		out.Signature = b.convertSignature(u, t)
 		return out
 	case *tc.Interface:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
 		out.Kind = types.Interface
 		t.Complete()
 		for i := 0; i < t.NumMethods(); i++ {
-			out.Methods = append(out.Methods, b.walkType(u, nil, t.Method(i).Type()))
+			if out.Methods == nil {
+				out.Methods = map[string]*types.Type{}
+			}
+			out.Methods[t.Method(i).Name()] = b.walkType(u, nil, t.Method(i).Type())
 		}
 		return out
 	case *tc.Named:
 		switch t.Underlying().(type) {
-		case *tc.Named, *tc.Basic:
+		case *tc.Named, *tc.Basic, *tc.Map, *tc.Slice:
 			name := tcNameToName(t.String())
-			out := u.Get(name)
+			out := u.Type(name)
 			if out.Kind != types.Unknown {
 				return out
 			}
@@ -471,7 +662,7 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 			// "feature" for users. This flattens those types
 			// together.
 			name := tcNameToName(t.String())
-			if out := u.Get(name); out.Kind != types.Unknown {
+			if out := u.Type(name); out.Kind != types.Unknown {
 				return out // short circuit if we've already made this.
 			}
 			out := b.walkType(u, &name, t.Underlying())
@@ -480,18 +671,43 @@ func (b *Builder) walkType(u types.Universe, useName *types.Name, in tc.Type) *t
 				// methods, add them. (Interface types will
 				// have already added methods.)
 				for i := 0; i < t.NumMethods(); i++ {
-					out.Methods = append(out.Methods, b.walkType(u, nil, t.Method(i).Type()))
+					if out.Methods == nil {
+						out.Methods = map[string]*types.Type{}
+					}
+					out.Methods[t.Method(i).Name()] = b.walkType(u, nil, t.Method(i).Type())
 				}
 			}
 			return out
 		}
 	default:
-		out := u.Get(name)
+		out := u.Type(name)
 		if out.Kind != types.Unknown {
 			return out
 		}
 		out.Kind = types.Unsupported
-		fmt.Printf("Making unsupported type entry %q for: %#v\n", out, t)
+		glog.Warningf("Making unsupported type entry %q for: %#v\n", out, t)
 		return out
 	}
+}
+
+func (b *Builder) addFunction(u types.Universe, useName *types.Name, in *tc.Func) *types.Type {
+	name := tcFuncNameToName(in.String())
+	if useName != nil {
+		name = *useName
+	}
+	out := u.Function(name)
+	out.Kind = types.DeclarationOf
+	out.Underlying = b.walkType(u, nil, in.Type())
+	return out
+}
+
+func (b *Builder) addVariable(u types.Universe, useName *types.Name, in *tc.Var) *types.Type {
+	name := tcVarNameToName(in.String())
+	if useName != nil {
+		name = *useName
+	}
+	out := u.Variable(name)
+	out.Kind = types.DeclarationOf
+	out.Underlying = b.walkType(u, nil, in.Type())
+	return out
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,14 +20,17 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/testapi"
+	apitesting "k8s.io/kubernetes/pkg/api/testing"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 func newIngress() extensions.Ingress {
 	defaultBackend := extensions.IngressBackend{
 		ServiceName: "default-backend",
-		ServicePort: util.IntOrString{Kind: util.IntstrInt, IntVal: 80},
+		ServicePort: intstr.FromInt(80),
 	}
 	return extensions.Ingress{
 		ObjectMeta: api.ObjectMeta{
@@ -37,7 +40,7 @@ func newIngress() extensions.Ingress {
 		Spec: extensions.IngressSpec{
 			Backend: &extensions.IngressBackend{
 				ServiceName: "default-backend",
-				ServicePort: util.IntOrString{Kind: util.IntstrInt, IntVal: 80},
+				ServicePort: intstr.FromInt(80),
 			},
 			Rules: []extensions.IngressRule{
 				{
@@ -127,4 +130,13 @@ func TestIngressStatusStrategy(t *testing.T) {
 	if len(errs) != 0 {
 		t.Errorf("Unexpected error %v", errs)
 	}
+}
+
+func TestSelectableFieldLabelConversions(t *testing.T) {
+	apitesting.TestSelectableFieldLabelConversionsOfKind(t,
+		testapi.Extensions.GroupVersion().String(),
+		"Ingress",
+		labels.Set(IngressToSelectableFields(&extensions.Ingress{})),
+		nil,
+	)
 }

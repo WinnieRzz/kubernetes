@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,18 +22,20 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/validation"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
+	"k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/storage"
+	utilnet "k8s.io/kubernetes/pkg/util/net"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // podStrategy implements behavior for Pods
@@ -67,9 +69,13 @@ func (podStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new pod.
-func (podStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (podStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	pod := obj.(*api.Pod)
 	return validation.ValidatePod(pod)
+}
+
+// Canonicalize normalizes the object after validation.
+func (podStrategy) Canonicalize(obj runtime.Object) {
 }
 
 // AllowCreateOnUpdate is false for pods.
@@ -78,7 +84,7 @@ func (podStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (podStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (podStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	errorList := validation.ValidatePod(obj.(*api.Pod))
 	return append(errorList, validation.ValidatePodUpdate(obj.(*api.Pod), old.(*api.Pod))...)
 }
@@ -143,7 +149,7 @@ func (podStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 	newPod.DeletionTimestamp = nil
 }
 
-func (podStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (podStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	// TODO: merge valid fields after update
 	return validation.ValidatePodStatusUpdate(obj.(*api.Pod), old.(*api.Pod))
 }
@@ -158,18 +164,38 @@ func MatchPod(label labels.Selector, field fields.Selector) generic.Matcher {
 			if !ok {
 				return nil, nil, fmt.Errorf("not a pod")
 			}
-			return labels.Set(pod.ObjectMeta.Labels), PodToSelectableFields(pod), nil
+
+			// podLabels is already sitting there ready to be used.
+			// podFields is not available directly and requires allocation of a map.
+			// Only bother if the fields might be useful to determining the match.
+			// One common case is for a replication controller to set up a watch
+			// based on labels alone; in that case we can avoid allocating the field map.
+			// This is especially important in the apiserver.
+			podLabels := labels.Set(pod.ObjectMeta.Labels)
+			var podFields fields.Set
+			if !field.Empty() && label.Matches(podLabels) {
+				podFields = PodToSelectableFields(pod)
+			}
+			return podLabels, podFields, nil
 		},
+		IndexFields: []string{"spec.nodeName"},
 	}
+}
+
+func NodeNameTriggerFunc(obj runtime.Object) []storage.MatchValue {
+	pod := obj.(*api.Pod)
+	result := storage.MatchValue{IndexName: "spec.nodeName", Value: pod.Spec.NodeName}
+	return []storage.MatchValue{result}
 }
 
 // PodToSelectableFields returns a field set that represents the object
 // TODO: fields are not labels, and the validation rules for them do not apply.
 func PodToSelectableFields(pod *api.Pod) fields.Set {
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(pod.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(pod.ObjectMeta, true)
 	podSpecificFieldsSet := fields.Set{
-		"spec.nodeName": pod.Spec.NodeName,
-		"status.phase":  string(pod.Status.Phase),
+		"spec.nodeName":      pod.Spec.NodeName,
+		"spec.restartPolicy": string(pod.Spec.RestartPolicy),
+		"status.phase":       string(pod.Status.Phase),
 	}
 	return generic.MergeFieldsSets(objectMetaFieldsSet, podSpecificFieldsSet)
 }
@@ -195,7 +221,7 @@ func getPod(getter ResourceGetter, ctx api.Context, name string) (*api.Pod, erro
 func ResourceLocation(getter ResourceGetter, rt http.RoundTripper, ctx api.Context, id string) (*url.URL, http.RoundTripper, error) {
 	// Allow ID as "podname" or "podname:port" or "scheme:podname:port".
 	// If port is not specified, try to use the first defined port on the pod.
-	scheme, name, port, valid := util.SplitSchemeNamePort(id)
+	scheme, name, port, valid := utilnet.SplitSchemeNamePort(id)
 	if !valid {
 		return nil, nil, errors.NewBadRequest(fmt.Sprintf("invalid pod request %q", id))
 	}
@@ -227,21 +253,50 @@ func ResourceLocation(getter ResourceGetter, rt http.RoundTripper, ctx api.Conte
 	return loc, rt, nil
 }
 
+// getContainerNames returns a formatted string containing the container names
+func getContainerNames(containers []api.Container) string {
+	names := []string{}
+	for _, c := range containers {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, " ")
+}
+
 // LogLocation returns the log URL for a pod container. If opts.Container is blank
 // and only one container is present in the pod, that container is used.
-func LogLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ctx api.Context, name string, opts *api.PodLogOptions) (*url.URL, http.RoundTripper, error) {
+func LogLocation(
+	getter ResourceGetter,
+	connInfo client.ConnectionInfoGetter,
+	ctx api.Context,
+	name string,
+	opts *api.PodLogOptions,
+) (*url.URL, http.RoundTripper, error) {
 	pod, err := getPod(getter, ctx, name)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Try to figure out a container
+	// If a container was provided, it must be valid
 	container := opts.Container
-	if container == "" {
-		if len(pod.Spec.Containers) == 1 {
+	if len(container) == 0 {
+		switch len(pod.Spec.Containers) {
+		case 1:
 			container = pod.Spec.Containers[0].Name
-		} else {
+		case 0:
 			return nil, nil, errors.NewBadRequest(fmt.Sprintf("a container name must be specified for pod %s", name))
+		default:
+			containerNames := getContainerNames(pod.Spec.Containers)
+			initContainerNames := getContainerNames(pod.Spec.InitContainers)
+			err := fmt.Sprintf("a container name must be specified for pod %s, choose one of: [%s]", name, containerNames)
+			if len(initContainerNames) > 0 {
+				err += fmt.Sprintf(" or one of the init containers: [%s]", initContainerNames)
+			}
+			return nil, nil, errors.NewBadRequest(err)
+		}
+	} else {
+		if !podHasContainerWithName(pod, container) {
+			return nil, nil, errors.NewBadRequest(fmt.Sprintf("container %s is not valid for pod %s", container, name))
 		}
 	}
 	nodeHost := pod.Spec.NodeName
@@ -249,7 +304,7 @@ func LogLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ct
 		// If pod has not been assigned a host, return an empty location
 		return nil, nil, nil
 	}
-	nodeScheme, nodePort, nodeTransport, err := connInfo.GetConnectionInfo(nodeHost)
+	nodeScheme, nodePort, nodeTransport, err := connInfo.GetConnectionInfo(ctx, nodeHost)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -278,10 +333,24 @@ func LogLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ct
 	loc := &url.URL{
 		Scheme:   nodeScheme,
 		Host:     fmt.Sprintf("%s:%d", nodeHost, nodePort),
-		Path:     fmt.Sprintf("/containerLogs/%s/%s/%s", pod.Namespace, name, container),
+		Path:     fmt.Sprintf("/containerLogs/%s/%s/%s", pod.Namespace, pod.Name, container),
 		RawQuery: params.Encode(),
 	}
 	return loc, nodeTransport, nil
+}
+
+func podHasContainerWithName(pod *api.Pod, containerName string) bool {
+	for _, c := range pod.Spec.Containers {
+		if c.Name == containerName {
+			return true
+		}
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == containerName {
+			return true
+		}
+	}
+	return false
 }
 
 func streamParams(params url.Values, opts runtime.Object) error {
@@ -323,28 +392,62 @@ func streamParams(params url.Values, opts runtime.Object) error {
 
 // AttachLocation returns the attach URL for a pod container. If opts.Container is blank
 // and only one container is present in the pod, that container is used.
-func AttachLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ctx api.Context, name string, opts *api.PodAttachOptions) (*url.URL, http.RoundTripper, error) {
+func AttachLocation(
+	getter ResourceGetter,
+	connInfo client.ConnectionInfoGetter,
+	ctx api.Context,
+	name string,
+	opts *api.PodAttachOptions,
+) (*url.URL, http.RoundTripper, error) {
 	return streamLocation(getter, connInfo, ctx, name, opts, opts.Container, "attach")
 }
 
 // ExecLocation returns the exec URL for a pod container. If opts.Container is blank
 // and only one container is present in the pod, that container is used.
-func ExecLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ctx api.Context, name string, opts *api.PodExecOptions) (*url.URL, http.RoundTripper, error) {
+func ExecLocation(
+	getter ResourceGetter,
+	connInfo client.ConnectionInfoGetter,
+	ctx api.Context,
+	name string,
+	opts *api.PodExecOptions,
+) (*url.URL, http.RoundTripper, error) {
 	return streamLocation(getter, connInfo, ctx, name, opts, opts.Container, "exec")
 }
 
-func streamLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ctx api.Context, name string, opts runtime.Object, container, path string) (*url.URL, http.RoundTripper, error) {
+func streamLocation(
+	getter ResourceGetter,
+	connInfo client.ConnectionInfoGetter,
+	ctx api.Context,
+	name string,
+	opts runtime.Object,
+	container,
+	path string,
+) (*url.URL, http.RoundTripper, error) {
 	pod, err := getPod(getter, ctx, name)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Try to figure out a container
+	// If a container was provided, it must be valid
 	if container == "" {
-		if len(pod.Spec.Containers) == 1 {
+		switch len(pod.Spec.Containers) {
+		case 1:
 			container = pod.Spec.Containers[0].Name
-		} else {
+		case 0:
 			return nil, nil, errors.NewBadRequest(fmt.Sprintf("a container name must be specified for pod %s", name))
+		default:
+			containerNames := getContainerNames(pod.Spec.Containers)
+			initContainerNames := getContainerNames(pod.Spec.InitContainers)
+			err := fmt.Sprintf("a container name must be specified for pod %s, choose one of: [%s]", name, containerNames)
+			if len(initContainerNames) > 0 {
+				err += fmt.Sprintf(" or one of the init containers: [%s]", initContainerNames)
+			}
+			return nil, nil, errors.NewBadRequest(err)
+		}
+	} else {
+		if !podHasContainerWithName(pod, container) {
+			return nil, nil, errors.NewBadRequest(fmt.Sprintf("container %s is not valid for pod %s", container, name))
 		}
 	}
 	nodeHost := pod.Spec.NodeName
@@ -352,7 +455,7 @@ func streamLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter,
 		// If pod has not been assigned a host, return an empty location
 		return nil, nil, errors.NewBadRequest(fmt.Sprintf("pod %s does not have a host assigned", name))
 	}
-	nodeScheme, nodePort, nodeTransport, err := connInfo.GetConnectionInfo(nodeHost)
+	nodeScheme, nodePort, nodeTransport, err := connInfo.GetConnectionInfo(ctx, nodeHost)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -363,14 +466,19 @@ func streamLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter,
 	loc := &url.URL{
 		Scheme:   nodeScheme,
 		Host:     fmt.Sprintf("%s:%d", nodeHost, nodePort),
-		Path:     fmt.Sprintf("/%s/%s/%s/%s", path, pod.Namespace, name, container),
+		Path:     fmt.Sprintf("/%s/%s/%s/%s", path, pod.Namespace, pod.Name, container),
 		RawQuery: params.Encode(),
 	}
 	return loc, nodeTransport, nil
 }
 
 // PortForwardLocation returns the port-forward URL for a pod.
-func PortForwardLocation(getter ResourceGetter, connInfo client.ConnectionInfoGetter, ctx api.Context, name string) (*url.URL, http.RoundTripper, error) {
+func PortForwardLocation(
+	getter ResourceGetter,
+	connInfo client.ConnectionInfoGetter,
+	ctx api.Context,
+	name string,
+) (*url.URL, http.RoundTripper, error) {
 	pod, err := getPod(getter, ctx, name)
 	if err != nil {
 		return nil, nil, err
@@ -381,14 +489,14 @@ func PortForwardLocation(getter ResourceGetter, connInfo client.ConnectionInfoGe
 		// If pod has not been assigned a host, return an empty location
 		return nil, nil, errors.NewBadRequest(fmt.Sprintf("pod %s does not have a host assigned", name))
 	}
-	nodeScheme, nodePort, nodeTransport, err := connInfo.GetConnectionInfo(nodeHost)
+	nodeScheme, nodePort, nodeTransport, err := connInfo.GetConnectionInfo(ctx, nodeHost)
 	if err != nil {
 		return nil, nil, err
 	}
 	loc := &url.URL{
 		Scheme: nodeScheme,
 		Host:   fmt.Sprintf("%s:%d", nodeHost, nodePort),
-		Path:   fmt.Sprintf("/portForward/%s/%s", pod.Namespace, name),
+		Path:   fmt.Sprintf("/portForward/%s/%s", pod.Namespace, pod.Name),
 	}
 	return loc, nodeTransport, nil
 }

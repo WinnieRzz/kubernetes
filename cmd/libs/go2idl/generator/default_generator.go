@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,10 @@ import (
 
 	"k8s.io/kubernetes/cmd/libs/go2idl/namer"
 	"k8s.io/kubernetes/cmd/libs/go2idl/types"
+)
+
+const (
+	GolangFileType = "golang"
 )
 
 // DefaultGen implements a do-nothing Generator.
@@ -45,6 +49,7 @@ func (d DefaultGen) PackageVars(*Context) []string                       { retur
 func (d DefaultGen) PackageConsts(*Context) []string                     { return []string{} }
 func (d DefaultGen) GenerateType(*Context, *types.Type, io.Writer) error { return nil }
 func (d DefaultGen) Filename() string                                    { return d.OptionalName + ".go" }
+func (d DefaultGen) FileType() string                                    { return GolangFileType }
 
 func (d DefaultGen) Init(c *Context, w io.Writer) error {
 	_, err := w.Write(d.OptionalBody)

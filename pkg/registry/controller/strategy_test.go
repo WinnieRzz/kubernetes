@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,9 @@ import (
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/testapi"
+	apitesting "k8s.io/kubernetes/pkg/api/testing"
+	"k8s.io/kubernetes/pkg/labels"
 )
 
 func TestControllerStrategy(t *testing.T) {
@@ -137,4 +140,13 @@ func TestControllerStatusStrategy(t *testing.T) {
 	if len(errs) != 0 {
 		t.Errorf("Unexpected error %v", errs)
 	}
+}
+
+func TestSelectableFieldLabelConversions(t *testing.T) {
+	apitesting.TestSelectableFieldLabelConversionsOfKind(t,
+		testapi.Default.GroupVersion().String(),
+		"ReplicationController",
+		labels.Set(ControllerToSelectableFields(&api.ReplicationController{})),
+		nil,
+	)
 }

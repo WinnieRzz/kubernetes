@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import (
 
 func TestFlatten(t *testing.T) {
 	mapType := &Type{
-		Name: Name{"", "map[string]string"},
+		Name: Name{Package: "", Name: "map[string]string"},
 		Kind: Map,
 		Key:  String,
 		Elem: String,
@@ -33,7 +33,7 @@ func TestFlatten(t *testing.T) {
 			Name:     "Baz",
 			Embedded: true,
 			Type: &Type{
-				Name: Name{"pkg", "Baz"},
+				Name: Name{Package: "pkg", Name: "Baz"},
 				Kind: Struct,
 				Members: []Member{
 					{Name: "Foo", Type: String},
@@ -41,7 +41,7 @@ func TestFlatten(t *testing.T) {
 						Name:     "Qux",
 						Embedded: true,
 						Type: &Type{
-							Name:    Name{"pkg", "Qux"},
+							Name:    Name{Package: "pkg", Name: "Qux"},
 							Kind:    Struct,
 							Members: []Member{{Name: "Zot", Type: String}},
 						},

@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,6 +38,15 @@ var (
 		},
 		[]string{"verb", "url"},
 	)
+
+	RequestResult = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: restClientSubsystem,
+			Name:      "request_status_codes",
+			Help:      "Number of http requests, partitioned by metadata",
+		},
+		[]string{"code", "method", "host"},
+	)
 )
 
 var registerMetrics sync.Once
@@ -48,6 +57,7 @@ func Register() {
 	// Register the metrics.
 	registerMetrics.Do(func() {
 		prometheus.MustRegister(RequestLatency)
+		prometheus.MustRegister(RequestResult)
 	})
 }
 

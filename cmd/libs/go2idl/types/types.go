@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,10 +18,13 @@ package types
 
 // A type name may have a package qualifier.
 type Name struct {
-	// Empty if embedded or builtin. This is the package path.
+	// Empty if embedded or builtin. This is the package path unless Path is specified.
 	Package string
 	// The type name.
 	Name string
+	// An optional location of the type definition for languages that can have disjoint
+	// packages and paths.
+	Path string
 }
 
 // String returns the name formatted as a string.
@@ -58,11 +61,20 @@ const (
 
 	// The remaining types are included for completeness, but are not well
 	// supported.
-	Array       Kind = "Array" // Array is just like slice, but has a fixed length.
-	Chan        Kind = "Chan"
-	Func        Kind = "Func"
-	Unknown     Kind = ""
-	Unsupported Kind = "Unsupported"
+	Array Kind = "Array" // Array is just like slice, but has a fixed length.
+	Chan  Kind = "Chan"
+	Func  Kind = "Func"
+
+	// DeclarationOf is different from other Kinds; it indicates that instead of
+	// representing an actual Type, the type is a declaration of an instance of
+	// a type. E.g., a top-level function, variable, or constant. See the
+	// comment for Type.Name for more detail.
+	DeclarationOf Kind = "DeclarationOf"
+	Unknown       Kind = ""
+	Unsupported   Kind = "Unsupported"
+
+	// Protobuf is protobuf type.
+	Protobuf Kind = "Protobuf"
 )
 
 // Package holds package-level information.
@@ -77,9 +89,23 @@ type Package struct {
 	// 'package x' line.
 	Name string
 
+	// DocComments from doc.go, if any.
+	DocComments []string
+
+	// Comments from doc.go, if any.
+	Comments []string
+
 	// Types within this package, indexed by their name (*not* including
 	// package name).
 	Types map[string]*Type
+
+	// Functions within this package, indexed by their name (*not* including
+	// package name).
+	Functions map[string]*Type
+
+	// Global variables within this package, indexed by their name (*not* including
+	// package name).
+	Variables map[string]*Type
 
 	// Packages imported by this package, indexed by (canonicalized)
 	// package path.
@@ -92,8 +118,10 @@ func (p *Package) Has(name string) bool {
 	return has
 }
 
-// Get (or add) the given type
-func (p *Package) Get(typeName string) *Type {
+// Type gets the given Type in this Package.  If the Type is not already
+// defined, this will add it and return the new Type value.  The caller is
+// expected to finish initialization.
+func (p *Package) Type(typeName string) *Type {
 	if t, ok := p.Types[typeName]; ok {
 		return t
 	}
@@ -104,8 +132,36 @@ func (p *Package) Get(typeName string) *Type {
 			return t
 		}
 	}
-	t := &Type{Name: Name{p.Path, typeName}}
+	t := &Type{Name: Name{Package: p.Path, Name: typeName}}
 	p.Types[typeName] = t
+	return t
+}
+
+// Function gets the given function Type in this Package. If the function is
+// not already defined, this will add it.  If a function is added, it's the
+// caller's responsibility to finish construction of the function by setting
+// Underlying to the correct type.
+func (p *Package) Function(funcName string) *Type {
+	if t, ok := p.Functions[funcName]; ok {
+		return t
+	}
+	t := &Type{Name: Name{Package: p.Path, Name: funcName}}
+	t.Kind = DeclarationOf
+	p.Functions[funcName] = t
+	return t
+}
+
+// Variable gets the given varaible Type in this Package. If the variable is
+// not already defined, this will add it. If a variable is added, it's the caller's
+// responsibility to finish construction of the variable by setting Underlying
+// to the correct type.
+func (p *Package) Variable(varName string) *Type {
+	if t, ok := p.Variables[varName]; ok {
+		return t
+	}
+	t := &Type{Name: Name{Package: p.Path, Name: varName}}
+	t.Kind = DeclarationOf
+	p.Variables[varName] = t
 	return t
 }
 
@@ -117,15 +173,32 @@ func (p *Package) HasImport(packageName string) bool {
 }
 
 // Universe is a map of all packages. The key is the package name, but you
-// should use Get() or Package() instead of direct access.
+// should use Package(), Type(), Function(), or Variable() instead of direct
+// access.
 type Universe map[string]*Package
 
-// Get returns the canonical type for the given fully-qualified name. Builtin
+// Type returns the canonical type for the given fully-qualified name. Builtin
 // types will always be found, even if they haven't been explicitly added to
-// the map. If a non-existing type is requested, u will create (a marker for)
+// the map. If a non-existing type is requested, this will create (a marker for)
 // it.
-func (u Universe) Get(n Name) *Type {
-	return u.Package(n.Package).Get(n.Name)
+func (u Universe) Type(n Name) *Type {
+	return u.Package(n.Package).Type(n.Name)
+}
+
+// Function returns the canonical function for the given fully-qualified name.
+// If a non-existing function is requested, this will create (a marker for) it.
+// If a marker is created, it's the caller's responsibility to finish
+// construction of the function by setting Underlying to the correct type.
+func (u Universe) Function(n Name) *Type {
+	return u.Package(n.Package).Function(n.Name)
+}
+
+// Variable returns the canonical variable for the given fully-qualified name.
+// If a non-existing variable is requested, this will create (a marker for) it.
+// If a marker is created, it's the caller's responsibility to finish
+// construction of the variable by setting Underlying to the correct type.
+func (u Universe) Variable(n Name) *Type {
+	return u.Package(n.Package).Variable(n.Name)
 }
 
 // AddImports registers import lines for packageName. May be called multiple times.
@@ -137,15 +210,20 @@ func (u Universe) AddImports(packagePath string, importPaths ...string) {
 	}
 }
 
-// Get (create if needed) the package.
+// Package returns the Package for the given path.
+// If a non-existing package is requested, this will create (a marker for) it.
+// If a marker is created, it's the caller's responsibility to finish
+// construction of the package.
 func (u Universe) Package(packagePath string) *Package {
 	if p, ok := u[packagePath]; ok {
 		return p
 	}
 	p := &Package{
-		Path:    packagePath,
-		Types:   map[string]*Type{},
-		Imports: map[string]*Package{},
+		Path:      packagePath,
+		Types:     map[string]*Type{},
+		Functions: map[string]*Type{},
+		Variables: map[string]*Type{},
+		Imports:   map[string]*Package{},
 	}
 	u[packagePath] = p
 	return p
@@ -156,6 +234,11 @@ type Type struct {
 	// There are two general categories of types, those explicitly named
 	// and those anonymous. Named ones will have a non-empty package in the
 	// name field.
+	//
+	// An exception: If Kind == DeclarationOf, then this name is the name of a
+	// top-level function, variable, or const, and the type can be found in Underlying.
+	// We do this to allow the naming system to work against these objects, even
+	// though they aren't strictly speaking types.
 	Name Name
 
 	// The general kind of this type.
@@ -163,7 +246,24 @@ type Type struct {
 
 	// If there are comment lines immediately before the type definition,
 	// they will be recorded here.
-	CommentLines string
+	CommentLines []string
+
+	// If there are comment lines preceding the `CommentLines`, they will be
+	// recorded here. There are two cases:
+	// ---
+	// SecondClosestCommentLines
+	// a blank line
+	// CommentLines
+	// type definition
+	// ---
+	//
+	// or
+	// ---
+	// SecondClosestCommentLines
+	// a blank line
+	// type definition
+	// ---
+	SecondClosestCommentLines []string
 
 	// If Kind == Struct
 	Members []Member
@@ -175,12 +275,13 @@ type Type struct {
 	Key *Type
 
 	// If Kind == Alias, this is the underlying type.
+	// If Kind == DeclarationOf, this is the type of the declaration.
 	Underlying *Type
 
-	// If Kind == Interface, this is the list of all required functions.
+	// If Kind == Interface, this is the set of all required functions.
 	// Otherwise, if this is a named type, this is the list of methods that
 	// type has. (All elements will have Kind=="Func")
-	Methods []*Type
+	Methods map[string]*Type
 
 	// If Kind == func, this is the signature of the function.
 	Signature *Signature
@@ -195,6 +296,40 @@ func (t *Type) String() string {
 	return t.Name.String()
 }
 
+// IsPrimitive returns whether the type is a built-in type or is an alias to a
+// built-in type.  For example: strings and aliases of strings are primitives,
+// structs are not.
+func (t *Type) IsPrimitive() bool {
+	if t.Kind == Builtin || (t.Kind == Alias && t.Underlying.Kind == Builtin) {
+		return true
+	}
+	return false
+}
+
+// IsAssignable returns whether the type is deep-assignable.  For example,
+// slices and maps and pointers are shallow copies, but ints and strings are
+// complete.
+func (t *Type) IsAssignable() bool {
+	if t.IsPrimitive() {
+		return true
+	}
+	if t.Kind == Struct {
+		for _, m := range t.Members {
+			if !m.Type.IsAssignable() {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// IsAnonymousStruct returns true if the type is an anonymous struct or an alias
+// to an anonymous struct.
+func (t *Type) IsAnonymousStruct() bool {
+	return (t.Kind == Struct && t.Name.Name == "struct{}") || (t.Kind == Alias && t.Underlying.IsAnonymousStruct())
+}
+
 // A single struct member
 type Member struct {
 	// The name of the member.
@@ -206,7 +341,7 @@ type Member struct {
 
 	// If there are comment lines immediately before the member in the type
 	// definition, they will be recorded here.
-	CommentLines string
+	CommentLines []string
 
 	// If there are tags along with this member, they will be saved here.
 	Tags string
@@ -234,7 +369,7 @@ type Signature struct {
 
 	// If there are comment lines immediately before this
 	// signature/method/function declaration, they will be recorded here.
-	CommentLines string
+	CommentLines []string
 }
 
 // Built in types.
@@ -275,6 +410,22 @@ var (
 		Name: Name{Name: "uint"},
 		Kind: Builtin,
 	}
+	Uintptr = &Type{
+		Name: Name{Name: "uintptr"},
+		Kind: Builtin,
+	}
+	Float64 = &Type{
+		Name: Name{Name: "float64"},
+		Kind: Builtin,
+	}
+	Float32 = &Type{
+		Name: Name{Name: "float32"},
+		Kind: Builtin,
+	}
+	Float = &Type{
+		Name: Name{Name: "float"},
+		Kind: Builtin,
+	}
 	Bool = &Type{
 		Name: Name{Name: "bool"},
 		Kind: Builtin,
@@ -286,22 +437,35 @@ var (
 
 	builtins = &Package{
 		Types: map[string]*Type{
-			"bool":   Bool,
-			"string": String,
-			"int":    Int,
-			"int64":  Int64,
-			"int32":  Int32,
-			"int16":  Int16,
-			"int8":   Byte,
-			"uint":   Uint,
-			"uint64": Uint64,
-			"uint32": Uint32,
-			"uint16": Uint16,
-			"uint8":  Byte,
-			"byte":   Byte,
+			"bool":    Bool,
+			"string":  String,
+			"int":     Int,
+			"int64":   Int64,
+			"int32":   Int32,
+			"int16":   Int16,
+			"int8":    Byte,
+			"uint":    Uint,
+			"uint64":  Uint64,
+			"uint32":  Uint32,
+			"uint16":  Uint16,
+			"uint8":   Byte,
+			"uintptr": Uintptr,
+			"byte":    Byte,
+			"float":   Float,
+			"float64": Float64,
+			"float32": Float32,
 		},
 		Imports: map[string]*Package{},
 		Path:    "",
 		Name:    "",
 	}
 )
+
+func IsInteger(t *Type) bool {
+	switch t {
+	case Int, Int64, Int32, Int16, Uint, Uint64, Uint32, Uint16, Byte:
+		return true
+	default:
+		return false
+	}
+}

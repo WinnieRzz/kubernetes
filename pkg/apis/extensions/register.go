@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,24 +18,45 @@ package extensions
 
 import (
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apis/autoscaling"
+	"k8s.io/kubernetes/pkg/apis/batch"
+	"k8s.io/kubernetes/pkg/runtime"
 )
 
-func init() {
-	// Register the API.
-	addKnownTypes()
+// GroupName is the group name use in this package
+const GroupName = "extensions"
+
+// SchemeGroupVersion is group version used to register these objects
+var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: runtime.APIVersionInternal}
+
+// Kind takes an unqualified kind and returns back a Group qualified GroupKind
+func Kind(kind string) unversioned.GroupKind {
+	return SchemeGroupVersion.WithKind(kind).GroupKind()
+}
+
+// Resource takes an unqualified resource and returns back a Group qualified GroupResource
+func Resource(resource string) unversioned.GroupResource {
+	return SchemeGroupVersion.WithResource(resource).GroupResource()
+}
+
+func AddToScheme(scheme *runtime.Scheme) {
+	// Add the API to Scheme.
+	addKnownTypes(scheme)
 }
 
 // Adds the list of known types to api.Scheme.
-func addKnownTypes() {
-	api.Scheme.AddKnownTypes("",
-		&ClusterAutoscaler{},
-		&ClusterAutoscalerList{},
+func addKnownTypes(scheme *runtime.Scheme) {
+	// TODO this gets cleaned up when the types are fixed
+	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Deployment{},
 		&DeploymentList{},
-		&HorizontalPodAutoscaler{},
-		&HorizontalPodAutoscalerList{},
-		&Job{},
-		&JobList{},
+		&DeploymentRollback{},
+		&autoscaling.HorizontalPodAutoscaler{},
+		&autoscaling.HorizontalPodAutoscalerList{},
+		&batch.Job{},
+		&batch.JobList{},
+		&batch.JobTemplate{},
 		&ReplicationControllerDummy{},
 		&Scale{},
 		&ThirdPartyResource{},
@@ -46,24 +67,15 @@ func addKnownTypes() {
 		&ThirdPartyResourceDataList{},
 		&Ingress{},
 		&IngressList{},
+		&api.ListOptions{},
+		&ReplicaSet{},
+		&ReplicaSetList{},
+		&api.ExportOptions{},
+		&PodSecurityPolicy{},
+		&PodSecurityPolicyList{},
+		&NetworkPolicy{},
+		&NetworkPolicyList{},
+		&StorageClass{},
+		&StorageClassList{},
 	)
 }
-
-func (*ClusterAutoscaler) IsAnAPIObject()           {}
-func (*ClusterAutoscalerList) IsAnAPIObject()       {}
-func (*Deployment) IsAnAPIObject()                  {}
-func (*DeploymentList) IsAnAPIObject()              {}
-func (*HorizontalPodAutoscaler) IsAnAPIObject()     {}
-func (*HorizontalPodAutoscalerList) IsAnAPIObject() {}
-func (*Job) IsAnAPIObject()                         {}
-func (*JobList) IsAnAPIObject()                     {}
-func (*ReplicationControllerDummy) IsAnAPIObject()  {}
-func (*Scale) IsAnAPIObject()                       {}
-func (*ThirdPartyResource) IsAnAPIObject()          {}
-func (*ThirdPartyResourceList) IsAnAPIObject()      {}
-func (*DaemonSet) IsAnAPIObject()                   {}
-func (*DaemonSetList) IsAnAPIObject()               {}
-func (*ThirdPartyResourceData) IsAnAPIObject()      {}
-func (*ThirdPartyResourceDataList) IsAnAPIObject()  {}
-func (*Ingress) IsAnAPIObject()                     {}
-func (*IngressList) IsAnAPIObject()                 {}

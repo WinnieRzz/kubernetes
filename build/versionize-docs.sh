@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2015 The Kubernetes Authors All rights reserved.
+# Copyright 2015 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 # Updates the docs to be ready to be used as release docs for a particular
 # version.
 # Example usage:
-# ./versionize-docs.sh v1.0.1
+# ./versionize-docs.sh release-1.1
 
 set -o errexit
 set -o nounset
@@ -25,13 +25,14 @@ set -o pipefail
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 
-NEW_VERSION=${1-}
+RELEASE_BRANCH=${1-}
 
-# NEW_VERSION is expected to be vMajor.Minor.Micro.
-MAJOR_AND_MINOR_VERSION=${NEW_VERSION%.*}
+# MAJOR_AND_MINOR_VERSION is expected to be something like "v1.1"
+MAJOR_AND_MINOR_VERSION="v${RELEASE_BRANCH#release-}"
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: versionize-docs <release-version>"
+    echo "Usage: versionize-docs.sh <release-branch>, e.g., versionize-docs.sh release-1.1."
+    echo "The <release-branch> is used to rewrites link URL, which should always point to a release branch, NOT a tag like v1.1.1."
     exit 1
 fi
 
@@ -47,7 +48,7 @@ fi
 echo "+++ Versioning documentation and examples"
 
 # Update the docs to match this version.
-HTML_PREVIEW_PREFIX="https://htmlpreview.github.io/\?https://github.com/kubernetes/kubernetes"
+HTML_PREVIEW_PREFIX="https://htmlpreview.github.io/\?https://github.com/kubernetes/kubernetes/blob"
 # Update the include directory in definitions.md and operations.md.
 DIRECTORY_KEY_WORDS="<REPLACE-WITH-RELEASE-VERSION>"
 
@@ -59,11 +60,11 @@ done
 for doc in "${md_files[@]}"; do
   $SED -ri \
       -e '/<!-- BEGIN STRIP_FOR_RELEASE -->/,/<!-- END STRIP_FOR_RELEASE -->/d' \
-      -e "s|(releases.k8s.io)/[^/]+|\1/${NEW_VERSION}|g" \
+      -e "s|(releases.k8s.io)/[^/]+|\1/${RELEASE_BRANCH}|g" \
       "${doc}"
 
-  # Replace /HEAD in html preview links with /NEW_VERSION.
-  $SED -ri -e "s|(${HTML_PREVIEW_PREFIX})/HEAD|\1/blob/${NEW_VERSION}|g" "${doc}"
+  # Replace /HEAD in html preview links with /RELEASE_BRANCH
+  $SED -ri -e "s|(${HTML_PREVIEW_PREFIX})/HEAD|\1/${RELEASE_BRANCH}|g" "${doc}"
 
   # Replace <REPLACE-WITH-RELEASE-VERSION> with MAJOR_AND_MINOR_VERSION.
   $SED -ri -e "s|${DIRECTORY_KEY_WORDS}|${MAJOR_AND_MINOR_VERSION}|g" "${doc}"
@@ -91,11 +92,13 @@ go_files+=(pkg/apis/*/types.go)
 
 for file in "${go_files[@]}"; do
   $SED -ri \
-      -e "s|(releases.k8s.io)/[^/]+|\1/${NEW_VERSION}|g" \
-      -e "s|(${HTML_PREVIEW_PREFIX})/HEAD|\1/blob/${NEW_VERSION}|g" \
+      -e "s|(releases.k8s.io)/[^/]+|\1/${RELEASE_BRANCH}|g" \
+      -e "s|(${HTML_PREVIEW_PREFIX})/HEAD|\1/${RELEASE_BRANCH}|g" \
       "${file}"
 done
 
-${KUBE_ROOT}/hack/update-generated-docs.sh
+${KUBE_ROOT}/hack/update-munge-docs.sh
 ${KUBE_ROOT}/hack/update-generated-swagger-docs.sh
+${KUBE_ROOT}/hack/update-swagger-spec.sh
+${KUBE_ROOT}/hack/update-generated-protobuf.sh
 ./hack/update-api-reference-docs.sh

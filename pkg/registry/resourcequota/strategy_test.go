@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/api/testapi"
+	apitesting "k8s.io/kubernetes/pkg/api/testing"
 )
 
 func TestResourceQuotaStrategy(t *testing.T) {
@@ -55,4 +57,13 @@ func TestResourceQuotaStrategy(t *testing.T) {
 	if resourceQuota.Status.Used != nil {
 		t.Errorf("ResourceQuota does not allow setting status on create")
 	}
+}
+
+func TestSelectableFieldLabelConversions(t *testing.T) {
+	apitesting.TestSelectableFieldLabelConversionsOfKind(t,
+		testapi.Default.GroupVersion().String(),
+		"ResourceQuota",
+		ResourceQuotaToSelectableFields(&api.ResourceQuota{}),
+		nil,
+	)
 }

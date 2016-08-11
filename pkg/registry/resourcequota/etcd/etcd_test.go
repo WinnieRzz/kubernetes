@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,25 +17,25 @@ limitations under the License.
 package etcd
 
 import (
-	"fmt"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/api/rest"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/tools"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
+	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
+	"k8s.io/kubernetes/pkg/util/diff"
 )
 
-func newStorage(t *testing.T) (*REST, *StatusREST, *tools.FakeEtcdClient) {
-	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "")
-	storage, statusStorage := NewREST(etcdStorage)
-	return storage, statusStorage, fakeClient
+func newStorage(t *testing.T) (*REST, *StatusREST, *etcdtesting.EtcdTestServer) {
+	etcdStorage, server := registrytest.NewEtcdStorage(t, "")
+	restOptions := generic.RESTOptions{Storage: etcdStorage, Decorator: generic.UndecoratedStorage, DeleteCollectionWorkers: 1}
+	resourceQuotaStorage, statusStorage := NewREST(restOptions)
+	return resourceQuotaStorage, statusStorage, server
 }
 
 func validNewResourceQuota() *api.ResourceQuota {
@@ -58,8 +58,9 @@ func validNewResourceQuota() *api.ResourceQuota {
 }
 
 func TestCreate(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	resourcequota := validNewResourceQuota()
 	resourcequota.ObjectMeta = api.ObjectMeta{}
 	test.TestCreate(
@@ -72,23 +73,13 @@ func TestCreate(t *testing.T) {
 	)
 }
 
-func TestCreateRegistryError(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	fakeClient.Err = fmt.Errorf("test error")
-
-	resourcequota := validNewResourceQuota()
-	_, err := storage.Create(api.NewDefaultContext(), resourcequota)
-	if err != fakeClient.Err {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestCreateSetsFields(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
 	ctx := api.NewDefaultContext()
 	resourcequota := validNewResourceQuota()
 	_, err := storage.Create(api.NewDefaultContext(), resourcequota)
-	if err != fakeClient.Err {
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -106,26 +97,30 @@ func TestCreateSetsFields(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd).ReturnDeletedObject()
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store).ReturnDeletedObject()
 	test.TestDelete(validNewResourceQuota())
 }
 
 func TestGet(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestGet(validNewResourceQuota())
 }
 
 func TestList(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestList(validNewResourceQuota())
 }
 
 func TestWatch(t *testing.T) {
-	storage, _, fakeClient := newStorage(t)
-	test := registrytest.New(t, fakeClient, storage.Etcd)
+	storage, _, server := newStorage(t)
+	defer server.Terminate(t)
+	test := registrytest.New(t, storage.Store)
 	test.TestWatch(
 		validNewResourceQuota(),
 		// matching labels
@@ -146,19 +141,22 @@ func TestWatch(t *testing.T) {
 }
 
 func TestUpdateStatus(t *testing.T) {
-	storage, status, fakeClient := newStorage(t)
+	storage, status, server := newStorage(t)
+	defer server.Terminate(t)
 	ctx := api.NewDefaultContext()
 
 	key, _ := storage.KeyFunc(ctx, "foo")
 	key = etcdtest.AddPrefix(key)
 	resourcequotaStart := validNewResourceQuota()
-	fakeClient.Set(key, runtime.EncodeOrDie(testapi.Default.Codec(), resourcequotaStart), 0)
+	err := storage.Storage.Create(ctx, key, resourcequotaStart, nil, 0)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 
 	resourcequotaIn := &api.ResourceQuota{
 		ObjectMeta: api.ObjectMeta{
-			Name:            "foo",
-			Namespace:       api.NamespaceDefault,
-			ResourceVersion: "1",
+			Name:      "foo",
+			Namespace: api.NamespaceDefault,
 		},
 		Status: api.ResourceQuotaStatus{
 			Used: api.ResourceList{
@@ -180,17 +178,14 @@ func TestUpdateStatus(t *testing.T) {
 		},
 	}
 
-	expected := *resourcequotaStart
-	expected.ResourceVersion = "2"
-	expected.Labels = resourcequotaIn.Labels
-	expected.Status = resourcequotaIn.Status
-
-	_, _, err := status.Update(ctx, resourcequotaIn)
+	_, _, err = status.Update(ctx, resourcequotaIn.Name, rest.DefaultUpdatedObjectInfo(resourcequotaIn, api.Scheme))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	rqOut, err := storage.Get(ctx, "foo")
-	if !api.Semantic.DeepEqual(&expected, rqOut) {
-		t.Errorf("unexpected object: %s", util.ObjectDiff(&expected, rqOut))
+	obj, err := storage.Get(ctx, "foo")
+	rqOut := obj.(*api.ResourceQuota)
+	// only compare the meaningful update b/c we can't compare due to metadata
+	if !api.Semantic.DeepEqual(resourcequotaIn.Status, rqOut.Status) {
+		t.Errorf("unexpected object: %s", diff.ObjectDiff(resourcequotaIn, rqOut))
 	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import (
 )
 
 func GetServerVersion(w io.Writer, kubeClient client.Interface) {
-	serverVersion, err := kubeClient.ServerVersion()
+	serverVersion, err := kubeClient.Discovery().ServerVersion()
 	if err != nil {
 		fmt.Printf("Couldn't read server version from server: %v\n", err)
 		os.Exit(1)

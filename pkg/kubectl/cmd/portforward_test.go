@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,8 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	"k8s.io/kubernetes/pkg/client/unversioned/fake"
 )
 
@@ -36,14 +37,14 @@ type fakePortForwarder struct {
 	pfErr  error
 }
 
-func (f *fakePortForwarder) ForwardPorts(method string, url *url.URL, config *client.Config, ports []string, stopChan <-chan struct{}) error {
+func (f *fakePortForwarder) ForwardPorts(method string, url *url.URL, config *restclient.Config, ports []string, stopChan <-chan struct{}) error {
 	f.method = method
 	f.url = url
 	return f.pfErr
 }
 
 func TestPortForward(t *testing.T) {
-	version := testapi.Default.Version()
+	version := testapi.Default.GroupVersion().Version
 
 	tests := []struct {
 		name, version, podPath, pfPath, container string
@@ -67,14 +68,14 @@ func TestPortForward(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		f, tf, codec := NewAPIFactory()
+		f, tf, codec, ns := NewAPIFactory()
 		tf.Client = &fake.RESTClient{
-			Codec: codec,
-			Client: fake.HTTPClientFunc(func(req *http.Request) (*http.Response, error) {
+			NegotiatedSerializer: ns,
+			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				switch p, m := req.URL.Path, req.Method; {
 				case p == test.podPath && m == "GET":
 					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Body: body}, nil
+					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
 				default:
 					// Ensures no GET is performed when deleting by name
 					t.Errorf("%s: unexpected request: %#v\n%#v", test.name, req.URL, req)
@@ -83,7 +84,7 @@ func TestPortForward(t *testing.T) {
 			}),
 		}
 		tf.Namespace = "test"
-		tf.ClientConfig = &client.Config{Version: test.version}
+		tf.ClientConfig = &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: &unversioned.GroupVersion{Version: test.version}}}
 		ff := &fakePortForwarder{}
 		if test.pfErr {
 			ff.pfErr = fmt.Errorf("pf error")
@@ -113,7 +114,7 @@ func TestPortForward(t *testing.T) {
 }
 
 func TestPortForwardWithPFlag(t *testing.T) {
-	version := testapi.Default.Version()
+	version := testapi.Default.GroupVersion().Version
 
 	tests := []struct {
 		name, version, podPath, pfPath, container string
@@ -137,14 +138,14 @@ func TestPortForwardWithPFlag(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		f, tf, codec := NewAPIFactory()
+		f, tf, codec, ns := NewAPIFactory()
 		tf.Client = &fake.RESTClient{
-			Codec: codec,
-			Client: fake.HTTPClientFunc(func(req *http.Request) (*http.Response, error) {
+			NegotiatedSerializer: ns,
+			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				switch p, m := req.URL.Path, req.Method; {
 				case p == test.podPath && m == "GET":
 					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Body: body}, nil
+					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
 				default:
 					// Ensures no GET is performed when deleting by name
 					t.Errorf("%s: unexpected request: %#v\n%#v", test.name, req.URL, req)
@@ -153,7 +154,7 @@ func TestPortForwardWithPFlag(t *testing.T) {
 			}),
 		}
 		tf.Namespace = "test"
-		tf.ClientConfig = &client.Config{Version: test.version}
+		tf.ClientConfig = &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: &unversioned.GroupVersion{Version: test.version}}}
 		ff := &fakePortForwarder{}
 		if test.pfErr {
 			ff.pfErr = fmt.Errorf("pf error")

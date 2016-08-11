@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,10 +24,13 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/kubernetes/federation/apis/federation"
+	fed_fake "k8s.io/kubernetes/federation/client/clientset_generated/federation_internalclientset/fake"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
 )
@@ -48,7 +51,7 @@ func TestDescribePod(t *testing.T) {
 	})
 	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
 	d := PodDescriber{c}
-	out, err := d.Describe("foo", "bar")
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -66,7 +69,7 @@ func TestDescribeService(t *testing.T) {
 	})
 	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
 	d := ServiceDescriber{c}
-	out, err := d.Describe("foo", "bar")
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -85,6 +88,7 @@ func TestPodDescribeResultsSorted(t *testing.T) {
 				FirstTimestamp: unversioned.NewTime(time.Date(2014, time.January, 15, 0, 0, 0, 0, time.UTC)),
 				LastTimestamp:  unversioned.NewTime(time.Date(2014, time.January, 15, 0, 0, 0, 0, time.UTC)),
 				Count:          1,
+				Type:           api.EventTypeNormal,
 			},
 			{
 				Source:         api.EventSource{Component: "scheduler"},
@@ -92,6 +96,7 @@ func TestPodDescribeResultsSorted(t *testing.T) {
 				FirstTimestamp: unversioned.NewTime(time.Date(1987, time.June, 17, 0, 0, 0, 0, time.UTC)),
 				LastTimestamp:  unversioned.NewTime(time.Date(1987, time.June, 17, 0, 0, 0, 0, time.UTC)),
 				Count:          1,
+				Type:           api.EventTypeNormal,
 			},
 			{
 				Source:         api.EventSource{Component: "kubelet"},
@@ -99,6 +104,7 @@ func TestPodDescribeResultsSorted(t *testing.T) {
 				FirstTimestamp: unversioned.NewTime(time.Date(2002, time.December, 25, 0, 0, 0, 0, time.UTC)),
 				LastTimestamp:  unversioned.NewTime(time.Date(2002, time.December, 25, 0, 0, 0, 0, time.UTC)),
 				Count:          1,
+				Type:           api.EventTypeNormal,
 			},
 		},
 	})
@@ -106,7 +112,7 @@ func TestPodDescribeResultsSorted(t *testing.T) {
 	d := PodDescriber{c}
 
 	// Act
-	out, err := d.Describe("foo", "bar")
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
 
 	// Assert
 	if err != nil {
@@ -252,6 +258,21 @@ func TestDescribeContainers(t *testing.T) {
 			},
 			expectedElements: []string{"cpu", "1k", "memory", "4G", "storage", "20G"},
 		},
+		// Using requests.
+		{
+			container: api.Container{
+				Name:  "test",
+				Image: "image",
+				Resources: api.ResourceRequirements{
+					Requests: api.ResourceList{
+						api.ResourceName(api.ResourceCPU):     resource.MustParse("1000"),
+						api.ResourceName(api.ResourceMemory):  resource.MustParse("4G"),
+						api.ResourceName(api.ResourceStorage): resource.MustParse("20G"),
+					},
+				},
+			},
+			expectedElements: []string{"cpu", "1k", "memory", "4G", "storage", "20G"},
+		},
 	}
 
 	for i, testCase := range testCases {
@@ -264,7 +285,7 @@ func TestDescribeContainers(t *testing.T) {
 				ContainerStatuses: []api.ContainerStatus{testCase.status},
 			},
 		}
-		describeContainers(&pod, out)
+		describeContainers("Containers", pod.Spec.Containers, pod.Status.ContainerStatuses, EnvValueRetriever(&pod), out, "")
 		output := out.String()
 		for _, expected := range testCase.expectedElements {
 			if !strings.Contains(output, expected) {
@@ -356,53 +377,55 @@ func TestDefaultDescribers(t *testing.T) {
 
 func TestGetPodsTotalRequests(t *testing.T) {
 	testCases := []struct {
-		pods                         []*api.Pod
+		pods                         *api.PodList
 		expectedReqs, expectedLimits map[api.ResourceName]resource.Quantity
 	}{
 		{
-			pods: []*api.Pod{
-				{
-					Spec: api.PodSpec{
-						Containers: []api.Container{
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("1"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("300Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("1G"),
+			pods: &api.PodList{
+				Items: []api.Pod{
+					{
+						Spec: api.PodSpec{
+							Containers: []api.Container{
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("1"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("300Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("1G"),
+										},
 									},
 								},
-							},
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("90m"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("120Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("200M"),
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("90m"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("120Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("200M"),
+										},
 									},
 								},
 							},
 						},
 					},
-				},
-				{
-					Spec: api.PodSpec{
-						Containers: []api.Container{
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("60m"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("43Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("500M"),
+					{
+						Spec: api.PodSpec{
+							Containers: []api.Container{
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("60m"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("43Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("500M"),
+										},
 									},
 								},
-							},
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("34m"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("83Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("700M"),
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("34m"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("83Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("700M"),
+										},
 									},
 								},
 							},
@@ -423,7 +446,7 @@ func TestGetPodsTotalRequests(t *testing.T) {
 		if err != nil {
 			t.Errorf("Unexpected error %v", err)
 		}
-		if !reflect.DeepEqual(reqs, testCase.expectedReqs) {
+		if !api.Semantic.DeepEqual(reqs, testCase.expectedReqs) {
 			t.Errorf("Expected %v, got %v", testCase.expectedReqs, reqs)
 		}
 	}
@@ -486,7 +509,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 	for name, pv := range tests {
 		fake := testclient.NewSimpleFake(pv)
 		c := PersistentVolumeDescriber{fake}
-		str, err := c.Describe("foo", "bar")
+		str, err := c.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
 		if err != nil {
 			t.Errorf("Unexpected error for test %s: %v", name, err)
 		}
@@ -497,22 +520,180 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 }
 
 func TestDescribeDeployment(t *testing.T) {
-	fake := testclient.NewSimpleFake(&extensions.Deployment{
+	fake := fake.NewSimpleClientset(&extensions.Deployment{
 		ObjectMeta: api.ObjectMeta{
 			Name:      "bar",
 			Namespace: "foo",
 		},
 		Spec: extensions.DeploymentSpec{
-			Template: &api.PodTemplateSpec{},
+			Template: api.PodTemplateSpec{},
 		},
 	})
-	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
-	d := DeploymentDescriber{c}
-	out, err := d.Describe("foo", "bar")
+	d := DeploymentDescriber{fake}
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out, "bar") || !strings.Contains(out, "foo") {
 		t.Errorf("unexpected out: %s", out)
+	}
+}
+
+func TestDescribeCluster(t *testing.T) {
+	cluster := federation.Cluster{
+		ObjectMeta: api.ObjectMeta{
+			Name:            "foo",
+			ResourceVersion: "4",
+			Labels: map[string]string{
+				"name": "foo",
+			},
+		},
+		Spec: federation.ClusterSpec{
+			ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
+				{
+					ClientCIDR:    "0.0.0.0/0",
+					ServerAddress: "localhost:8888",
+				},
+			},
+		},
+		Status: federation.ClusterStatus{
+			Conditions: []federation.ClusterCondition{
+				{Type: federation.ClusterReady, Status: api.ConditionTrue},
+			},
+		},
+	}
+	fake := fed_fake.NewSimpleClientset(&cluster)
+	d := ClusterDescriber{Interface: fake}
+	out, err := d.Describe("any", "foo", DescriberSettings{ShowEvents: true})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "foo") {
+		t.Errorf("unexpected out: %s", out)
+	}
+}
+
+func TestDescribeEvents(t *testing.T) {
+
+	events := &api.EventList{
+		Items: []api.Event{
+			{
+				ObjectMeta: api.ObjectMeta{
+					Namespace: "foo",
+				},
+				Source:         api.EventSource{Component: "kubelet"},
+				Message:        "Item 1",
+				FirstTimestamp: unversioned.NewTime(time.Date(2014, time.January, 15, 0, 0, 0, 0, time.UTC)),
+				LastTimestamp:  unversioned.NewTime(time.Date(2014, time.January, 15, 0, 0, 0, 0, time.UTC)),
+				Count:          1,
+				Type:           api.EventTypeNormal,
+			},
+		},
+	}
+
+	m := map[string]Describer{
+		"DaemonSetDescriber": &DaemonSetDescriber{
+			testclient.NewSimpleFake(&extensions.DaemonSet{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+			}, events),
+		},
+		"DeploymentDescriber": &DeploymentDescriber{
+			fake.NewSimpleClientset(&extensions.Deployment{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+			}, events),
+		},
+		"EndpointsDescriber": &EndpointsDescriber{
+			testclient.NewSimpleFake(&api.Endpoints{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+			}, events),
+		},
+		// TODO(jchaloup): add tests for:
+		// - HorizontalPodAutoscalerDescriber
+		// - IngressDescriber
+		// - JobDescriber
+		"NodeDescriber": &NodeDescriber{
+			testclient.NewSimpleFake(&api.Node{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+					SelfLink:  "url/url/url",
+				},
+			}, events),
+		},
+		"PersistentVolumeDescriber": &PersistentVolumeDescriber{
+			testclient.NewSimpleFake(&api.PersistentVolume{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+					SelfLink:  "url/url/url",
+				},
+			}, events),
+		},
+		"PodDescriber": &PodDescriber{
+			testclient.NewSimpleFake(&api.Pod{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+					SelfLink:  "url/url/url",
+				},
+			}, events),
+		},
+		"ReplicaSetDescriber": &ReplicaSetDescriber{
+			testclient.NewSimpleFake(&extensions.ReplicaSet{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+			}, events),
+		},
+		"ReplicationControllerDescriber": &ReplicationControllerDescriber{
+			testclient.NewSimpleFake(&api.ReplicationController{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+			}, events),
+		},
+		"Service": &ServiceDescriber{
+			testclient.NewSimpleFake(&api.Service{
+				ObjectMeta: api.ObjectMeta{
+					Name:      "bar",
+					Namespace: "foo",
+				},
+			}, events),
+		},
+	}
+
+	for name, d := range m {
+		out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
+		if err != nil {
+			t.Errorf("unexpected error for %q: %v", name, err)
+		}
+		if !strings.Contains(out, "bar") {
+			t.Errorf("unexpected out for %q: %s", name, out)
+		}
+		if !strings.Contains(out, "Events:") {
+			t.Errorf("events not found for %q when ShowEvents=true: %s", name, out)
+		}
+
+		out, err = d.Describe("foo", "bar", DescriberSettings{ShowEvents: false})
+		if err != nil {
+			t.Errorf("unexpected error for %q: %s", name, err)
+		}
+		if !strings.Contains(out, "bar") {
+			t.Errorf("unexpected out for %q: %s", name, out)
+		}
+		if strings.Contains(out, "Events:") {
+			t.Errorf("events found for %q when ShowEvents=false: %s", name, out)
+		}
 	}
 }
